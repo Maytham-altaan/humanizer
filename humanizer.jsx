@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useRef } from "react";
+import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 
 /* ================================================================
    AI HUMANIZER & DETECTOR  —  QuillBot-style analysis
@@ -412,6 +412,8 @@ export default function Humanizer(){
   const [minWeight,setMinWeight]=useState(1);
   const [tab,setTab]=useState("detector"); // detector | humanizer
   const [openSentence,setOpenSentence]=useState(null);
+  const [autoBusy,setAutoBusy]=useState(false);
+  const [autoProgress,setAutoProgress]=useState({done:0,total:0});
 
   /* current working text = raw with all swaps applied */
   const tokens=useMemo(()=>tokenize(raw),[raw]);
@@ -465,8 +467,31 @@ export default function Humanizer(){
       refined:scored.filter(s=>s.verdict.key==="refined").length,
       human:scored.filter(s=>s.verdict.key==="human").length,
     };
+    /* GPTZero-style metrics surfaced to the user.
+       Perplexity proxy: how predictable the text is. We estimate it from
+       AI-favoured vocabulary density + formulaic-opener and hedging hits.
+       Higher number = more predictable = more AI-like.
+       Burstiness: variation in sentence length. Real humans vary; AI is
+       uniform. Std-deviation of sentence-word-counts. Higher = more human. */
+    let perpRaw=0;
+    scored.forEach(s=>{
+      s.signals.forEach(sig=>{
+        if(sig.label==="AI-favoured vocabulary"||
+           sig.label==="Formulaic opener"||
+           sig.label==="Hedging / filler phrasing")perpRaw+=sig.pts;
+      });
+    });
+    const perplexity=scored.length
+      ?Math.min(100,Math.round(perpRaw/scored.length*1.6))
+      :0;
+    let burstiness=0;
+    if(lengths.length>=2){
+      const m=totalWords/lengths.length;
+      const v=lengths.reduce((a,l)=>a+(l-m)*(l-m),0)/lengths.length;
+      burstiness=Math.round(Math.sqrt(v)*10)/10;
+    }
     return {sents:scored,docScore,counts,totalWords,
-            sentenceCount:scored.length};
+            sentenceCount:scored.length,perplexity,burstiness};
   },[workingText]);
 
   /* document verdict label */
@@ -481,6 +506,76 @@ export default function Humanizer(){
     setSwaps({});setPhraseSwaps({});
     setActive(null);setActivePhrase(null);setOpenSentence(null);
   },[]);
+
+  /* AUTO-HUMANIZE — sweep every flagged word & phrase and swap them.
+     Phrases use the curated alts. Single words try the Datamuse online API
+     first (real synonyms) and fall back to the offline thesaurus. */
+  const autoHumanize=useCallback(async()=>{
+    if(autoBusy)return;
+    setAutoBusy(true);
+    const newSwaps={...swaps};
+    const newPhraseSwaps={...phraseSwaps};
+
+    /* 1. Phrase-level swaps first (longer matches win) */
+    Object.values(phraseByStart).forEach(ph=>{
+      const key=ph.startTok+"-"+ph.endTok;
+      if(newPhraseSwaps[key]!==undefined)return;
+      const alts=ph.def.alt||[];
+      if(!alts.length)return;
+      const original=tokens.slice(ph.startTok,ph.endTok+1)
+        .map(t=>t.text).join("");
+      /* rotate pick by start index so repeated phrases vary */
+      const pick=alts[ph.startTok%alts.length];
+      newPhraseSwaps[key]=matchCase(original,pick);
+    });
+
+    /* 2. Word-level swaps for every flagged word not covered by a phrase */
+    const todo=tokens.filter(t=>
+      t.type==="word"&&
+      !coveredByPhrase[t.id]&&
+      (t.score||0)>=1&&
+      newSwaps[t.id]===undefined);
+    setAutoProgress({done:0,total:todo.length});
+
+    let done=0;
+    for(const t of todo){
+      const word=t.text.toLowerCase().replace(/['’]/g,"'");
+      let pick=null;
+      /* online first — Datamuse returns real-world synonyms */
+      try{
+        const syns=await fetchSynonyms(word);
+        if(syns&&syns.length){
+          /* pick a synonym that isn't the same word, prefer shorter ones
+             (humans use plain words more than AI does) */
+          const candidates=syns.filter(s=>{
+            const c=s.toLowerCase();
+            return c!==word&&!c.includes(" ")&&c.length<=word.length+4;
+          });
+          if(candidates.length)pick=candidates[t.id%candidates.length];
+          else pick=syns[0];
+        }
+      }catch(_){}
+      /* offline fallback from the curated thesaurus */
+      if(!pick){
+        const def=LEXICON[word]||LEXICON[word.replace(/['’]/g,"'")];
+        const alts=def?.alt||[];
+        if(alts.length)pick=alts[t.id%alts.length];
+      }
+      if(pick&&pick.toLowerCase()!==word){
+        newSwaps[t.id]=matchCase(t.text,pick);
+      }
+      done++;
+      if(done%4===0||done===todo.length){
+        setAutoProgress({done,total:todo.length});
+      }
+    }
+
+    setSwaps(newSwaps);
+    setPhraseSwaps(newPhraseSwaps);
+    setActive(null);setActivePhrase(null);setOpenSentence(null);
+    setAutoBusy(false);
+    setAutoProgress({done:0,total:0});
+  },[autoBusy,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
 
   const stats=useMemo(()=>{
     let w3=0,w2=0,w1=0,words=0;
@@ -659,6 +754,33 @@ export default function Humanizer(){
             <Pill n={analysis.counts.ai} label="AI" cls="sv-ai"/>
             <Pill n={analysis.counts.refined} label="refined" cls="sv-refined"/>
             <Pill n={analysis.counts.human} label="human" cls="sv-human"/>
+          </div>
+          <div style={S.metricRow}>
+            <div style={S.metricBox}>
+              <div style={S.metricVal}>{analysis.perplexity}</div>
+              <div style={S.metricLbl}>Perplexity proxy</div>
+              <div style={S.metricHint}>lower = more AI-like</div>
+            </div>
+            <div style={S.metricBox}>
+              <div style={S.metricVal}>{analysis.burstiness}</div>
+              <div style={S.metricLbl}>Burstiness</div>
+              <div style={S.metricHint}>higher = more human</div>
+            </div>
+          </div>
+          <div style={S.autoRow}>
+            <button
+              style={{...S.btnAuto,...(autoBusy?S.btnAutoBusy:{})}}
+              disabled={autoBusy}
+              onClick={autoHumanize}>
+              {autoBusy
+                ?("Humanizing… "+(autoProgress.total
+                    ?Math.round(autoProgress.done/autoProgress.total*100)+"%"
+                    :""))
+                :"Auto-humanize all"}
+            </button>
+            <button style={S.btnGhost} onClick={reset} disabled={autoBusy}>
+              Reset swaps
+            </button>
           </div>
         </div>
       </section>
@@ -1391,6 +1513,19 @@ const S={
   scoreText:{margin:"6px 0 10px",fontSize:14,color:"#475569",lineHeight:1.55,
     fontFamily:"ui-sans-serif, system-ui, sans-serif"},
   verdictPills:{display:"flex",gap:8,flexWrap:"wrap"},
+  metricRow:{display:"flex",gap:10,marginTop:14,flexWrap:"wrap",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  metricBox:{flex:"1 1 130px",background:"#f8fafc",border:"1px solid #e2e8f0",
+    borderRadius:8,padding:"8px 12px"},
+  metricVal:{fontSize:22,fontWeight:700,color:"#0f172a",lineHeight:1.1},
+  metricLbl:{fontSize:12,fontWeight:600,color:"#334155",marginTop:2},
+  metricHint:{fontSize:11,color:"#94a3b8",marginTop:2},
+  autoRow:{display:"flex",gap:10,marginTop:14,flexWrap:"wrap",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  btnAuto:{background:"#0f172a",color:"#fff",border:"none",borderRadius:8,
+    padding:"10px 18px",fontSize:14,fontWeight:700,cursor:"pointer",
+    minWidth:170},
+  btnAutoBusy:{background:"#64748b",cursor:"wait"},
   outputCard:{background:"#f8fafc"},
   label:{display:"block",fontSize:12,fontWeight:700,letterSpacing:"0.06em",
     textTransform:"uppercase",color:"#94a3b8",marginBottom:8,

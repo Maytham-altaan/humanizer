@@ -391,6 +391,155 @@ function matchCase(original,replacement){
   return replacement;
 }
 
+/* ================================================================
+   SENTENCE-LEVEL TRANSFORMS — the real GPTZero-fooling work
+   ----------------------------------------------------------------
+   Word-swaps don't drop perplexity much; GPTZero looks at token
+   predictability and sentence-rhythm uniformity. These transforms
+   target those signals directly:
+
+     1.  Contractions      ("it is" -> "it's")  — AI almost never
+         contracts; humans always do. Single biggest tell.
+     2.  Stripped openers  ("Moreover, " -> "")  — formulaic
+         transitions are uniform and predictable.
+     3.  Em-dash removal   (" — " -> ", ")  — modern GPTs over-use
+         em-dashes; their density is a strong flag.
+     4.  Sentence splitting at long ", and"/", but" joins — boosts
+         burstiness (length variance) and breaks rhythm uniformity.
+     5.  Padding-phrase removal ("It is important to note that…").
+   ================================================================ */
+const CONTRACTIONS=[
+  [/\bit is\b/g,"it's"],[/\bIt is\b/g,"It's"],
+  [/\bthat is\b/g,"that's"],[/\bThat is\b/g,"That's"],
+  [/\bthere is\b/g,"there's"],[/\bThere is\b/g,"There's"],
+  [/\bwhat is\b/g,"what's"],[/\bWhat is\b/g,"What's"],
+  [/\bhere is\b/g,"here's"],[/\bHere is\b/g,"Here's"],
+  [/\bdo not\b/g,"don't"],[/\bDo not\b/g,"Don't"],
+  [/\bdoes not\b/g,"doesn't"],[/\bDoes not\b/g,"Doesn't"],
+  [/\bdid not\b/g,"didn't"],[/\bDid not\b/g,"Didn't"],
+  [/\bcannot\b/g,"can't"],[/\bCannot\b/g,"Can't"],
+  [/\bcan not\b/g,"can't"],
+  [/\bwill not\b/g,"won't"],[/\bWill not\b/g,"Won't"],
+  [/\bwould not\b/g,"wouldn't"],[/\bWould not\b/g,"Wouldn't"],
+  [/\bshould not\b/g,"shouldn't"],[/\bShould not\b/g,"Shouldn't"],
+  [/\bcould not\b/g,"couldn't"],[/\bCould not\b/g,"Couldn't"],
+  [/\bis not\b/g,"isn't"],[/\bIs not\b/g,"Isn't"],
+  [/\bare not\b/g,"aren't"],[/\bAre not\b/g,"Aren't"],
+  [/\bwas not\b/g,"wasn't"],[/\bWas not\b/g,"Wasn't"],
+  [/\bwere not\b/g,"weren't"],[/\bWere not\b/g,"Weren't"],
+  [/\bhas not\b/g,"hasn't"],[/\bHas not\b/g,"Hasn't"],
+  [/\bhave not\b/g,"haven't"],[/\bHave not\b/g,"Haven't"],
+  [/\bhad not\b/g,"hadn't"],[/\bHad not\b/g,"Hadn't"],
+  [/\bI am\b/g,"I'm"],
+  [/\bwe are\b/g,"we're"],[/\bWe are\b/g,"We're"],
+  [/\byou are\b/g,"you're"],[/\bYou are\b/g,"You're"],
+  [/\bthey are\b/g,"they're"],[/\bThey are\b/g,"They're"],
+  [/\blet us\b/g,"let's"],[/\bLet us\b/g,"Let's"],
+  [/\bI will\b/g,"I'll"],[/\bI have\b/g,"I've"],
+  [/\bwe will\b/g,"we'll"],[/\byou will\b/g,"you'll"],
+  [/\bthey will\b/g,"they'll"],
+  [/\bwe have\b/g,"we've"],[/\byou have\b/g,"you've"],
+  [/\bthey have\b/g,"they've"],
+];
+
+/* Openers/markers to delete entirely from sentence starts. */
+const OPENER_STRIPS=[
+  "Moreover","Furthermore","Additionally","Notably","Importantly",
+  "Ultimately","In conclusion","In summary","Overall","Indeed",
+  "Essentially","Arguably","Specifically","In fact","To begin with",
+  "First and foremost","Last but not least","Needless to say",
+];
+
+/* Formal/AI connectors rewritten to plain ones. */
+const OPENER_REWRITES=[
+  [/(^|[.!?]\s+)Consequently,\s+/g,"$1So "],
+  [/(^|[.!?]\s+)Subsequently,\s+/g,"$1Then "],
+  [/(^|[.!?]\s+)Therefore,\s+/g,"$1So "],
+  [/(^|[.!?]\s+)Hence,\s+/g,"$1So "],
+  [/(^|[.!?]\s+)Thus,\s+/g,"$1So "],
+  [/(^|[.!?]\s+)However,\s+/g,"$1But "],
+  [/(^|[.!?]\s+)Nevertheless,\s+/g,"$1Still, "],
+  [/(^|[.!?]\s+)Nonetheless,\s+/g,"$1Still, "],
+];
+
+/* Padding phrases stripped from sentence starts (the next word is
+   re-capitalized so the result still reads grammatical). */
+const PADDING_STRIPS=[
+  /It is important to note that\s+/i,
+  /It's important to note that\s+/i,
+  /It is worth noting that\s+/i,
+  /It's worth noting that\s+/i,
+  /It should be noted that\s+/i,
+  /It must be noted that\s+/i,
+  /It goes without saying that\s+/i,
+];
+
+function applySentenceTransforms(text){
+  let s=text;
+
+  /* 1. Strip padding phrases (then re-cap next word) */
+  PADDING_STRIPS.forEach(re=>{
+    const g=new RegExp("(^|[.!?]\\s+)"+re.source+"([a-z])","gi");
+    s=s.replace(g,(_m,p,c)=>p+c.toUpperCase());
+  });
+
+  /* 2. Strip formulaic openers (delete opener + comma, cap next word) */
+  OPENER_STRIPS.forEach(o=>{
+    const esc=o.replace(/[.*+?^${}()|[\]\\]/g,"\\$&").replace(/\s/g,"\\s");
+    const re=new RegExp("(^|[.!?]\\s+)"+esc+",\\s+([a-z])","gi");
+    s=s.replace(re,(_m,p,c)=>p+c.toUpperCase());
+  });
+
+  /* 3. Rewrite formal connectors */
+  OPENER_REWRITES.forEach(([re,sub])=>{s=s.replace(re,sub);});
+
+  /* 4. Contractions */
+  CONTRACTIONS.forEach(([re,sub])=>{s=s.replace(re,sub);});
+
+  /* 5. Em-dash to comma (modern-GPT tell) */
+  s=s.replace(/\s*[—–]\s*/g,", ");
+  s=s.replace(/\s+--\s+/g,", ");
+
+  /* 6. Split overly long sentences at ", and"/", but"/", so" */
+  s=splitLongSentences(s,26);
+
+  /* 7. Tidy whitespace + orphan punctuation */
+  s=s.replace(/\s+([.,;:!?])/g,"$1");
+  s=s.replace(/\s{2,}/g," ");
+  return s.trim();
+}
+
+function splitLongSentences(text,threshold){
+  return text.replace(/[^.!?]+[.!?]+/g,sentence=>{
+    const wc=(sentence.match(/\b[a-zA-Z]+\b/g)||[]).length;
+    if(wc<threshold)return sentence;
+    const m=sentence.match(/,\s+(and|but|so|yet|or|because)\s+/i);
+    if(!m||m.index<12)return sentence;
+    const first=sentence.slice(0,m.index).trim();
+    let rest=sentence.slice(m.index+m[0].length).trim();
+    rest=rest.charAt(0).toUpperCase()+rest.slice(1);
+    return first+". "+rest;
+  });
+}
+
+/* Pure assembly helper — applies word + phrase swaps to the token
+   stream and produces a string. Extracted so autoHumanize can call
+   it with freshly-built swap maps before running text transforms. */
+function assembleText(tokens,swaps,phraseSwaps,phraseByStart){
+  let res="",i=0;
+  while(i<tokens.length){
+    const t=tokens[i];
+    const ph=phraseByStart[i];
+    if(ph&&phraseSwaps[ph.startTok+"-"+ph.endTok]!==undefined){
+      res+=phraseSwaps[ph.startTok+"-"+ph.endTok];
+      i=ph.endTok+1;continue;
+    }
+    res+=t.type==="word"?(swaps[t.id]??t.text):t.text;
+    i++;
+  }
+  return res.replace(/\s{2,}/g," ").replace(/\s+([.,;:])/g,"$1");
+}
+
 const SAMPLE=
   "In today's world, leveraging cutting-edge technology plays a crucial "+
   "role in the realm of healthcare. It is important to note that a "+
@@ -414,6 +563,7 @@ export default function Humanizer(){
   const [openSentence,setOpenSentence]=useState(null);
   const [autoBusy,setAutoBusy]=useState(false);
   const [autoProgress,setAutoProgress]=useState({done:0,total:0});
+  const [rawBackup,setRawBackup]=useState(null);
 
   /* current working text = raw with all swaps applied */
   const tokens=useMemo(()=>tokenize(raw),[raw]);
@@ -429,20 +579,9 @@ export default function Humanizer(){
     return{phraseByStart:byStart,coveredByPhrase:covered};
   },[phrases,minWeight]);
 
-  const workingText=useMemo(()=>{
-    let res="",i=0;
-    while(i<tokens.length){
-      const t=tokens[i];
-      const ph=phraseByStart[i];
-      if(ph&&phraseSwaps[ph.startTok+"-"+ph.endTok]!==undefined){
-        res+=phraseSwaps[ph.startTok+"-"+ph.endTok];
-        i=ph.endTok+1;continue;
-      }
-      res+=t.type==="word"?(swaps[t.id]??t.text):t.text;
-      i++;
-    }
-    return res.replace(/\s{2,}/g," ").replace(/\s+([.,;:])/g,"$1");
-  },[tokens,swaps,phraseSwaps,phraseByStart]);
+  const workingText=useMemo(
+    ()=>assembleText(tokens,swaps,phraseSwaps,phraseByStart),
+    [tokens,swaps,phraseSwaps,phraseByStart]);
 
   /* ---- DETECTOR analysis over the working text ---- */
   const analysis=useMemo(()=>{
@@ -570,12 +709,31 @@ export default function Humanizer(){
       }
     }
 
-    setSwaps(newSwaps);
-    setPhraseSwaps(newPhraseSwaps);
+    /* 3. Assemble swapped text, then run sentence-level transforms
+          (contractions, opener strip, em-dash kill, sentence split).
+          This is where most of the GPTZero score actually drops. */
+    const swapped=assembleText(tokens,newSwaps,newPhraseSwaps,phraseByStart);
+    const rewritten=applySentenceTransforms(swapped);
+
+    /* 4. Replace the raw text with the rewritten version. Tokens,
+          phrases, analysis all recompute automatically. Keep a backup
+          so the user can undo. */
+    setRawBackup(raw);
+    setRaw(rewritten);
+    setSwaps({});
+    setPhraseSwaps({});
     setActive(null);setActivePhrase(null);setOpenSentence(null);
     setAutoBusy(false);
     setAutoProgress({done:0,total:0});
-  },[autoBusy,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
+  },[autoBusy,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
+
+  const undoAuto=useCallback(()=>{
+    if(rawBackup===null)return;
+    setRaw(rawBackup);
+    setRawBackup(null);
+    setSwaps({});setPhraseSwaps({});
+    setActive(null);setActivePhrase(null);setOpenSentence(null);
+  },[rawBackup]);
 
   const stats=useMemo(()=>{
     let w3=0,w2=0,w1=0,words=0;
@@ -735,6 +893,7 @@ export default function Humanizer(){
             setRaw(e.target.value);
             setSwaps({});setPhraseSwaps({});
             setActive(null);setActivePhrase(null);setOpenSentence(null);
+            setRawBackup(null);
           }}/>
       </section>
 
@@ -778,6 +937,11 @@ export default function Humanizer(){
                     :""))
                 :"Auto-humanize all"}
             </button>
+            {rawBackup!==null&&(
+              <button style={S.btnGhost} onClick={undoAuto} disabled={autoBusy}>
+                Undo auto-humanize
+              </button>
+            )}
             <button style={S.btnGhost} onClick={reset} disabled={autoBusy}>
               Reset swaps
             </button>

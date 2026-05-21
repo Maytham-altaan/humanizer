@@ -603,67 +603,97 @@ function assembleText(tokens,swaps,phraseSwaps,phraseByStart){
    instead of the offline transforms. The key never leaves the
    browser; the call goes direct to api.anthropic.com.
    ================================================================ */
-async function callClaudeAPI(apiKey,model,text){
-  const systemPrompt=[
-    "You are rewriting AI-generated text so that GPTZero and other AI",
-    "detectors classify it as human-written. Your goal: score under 30%",
-    "AI on GPTZero.",
-    "",
-    "HARD BAN — never use any of these words or phrases in your output.",
-    "If the original uses them, replace with a plain alternative or just",
-    "drop the sentence and rewrite the meaning:",
-    "  cutting-edge, state-of-the-art, innovative, innovation,",
-    "  framework, ecosystem, landscape, tapestry, paradigm,",
-    "  streamline, facilitate, leverage, harness, navigate, empower,",
-    "  robust, comprehensive, seamless, data-driven, holistic, dynamic,",
-    "  plays a critical role, plays a vital role, plays a key role,",
-    "  in today's world, in the realm of, in the world of,",
-    "  moreover, furthermore, additionally, consequently, ultimately,",
-    "  it is important to note, it is worth noting, it should be noted,",
-    "  delve into, shed light on, dive into, navigate the complexities,",
-    "  rich tapestry, ever-evolving, fast-paced, game-changer,",
-    "  em-dashes (—). Use commas or periods instead.",
-    "",
-    "REQUIRED in your output:",
-    "  1. At least 2 contractions (it's, don't, won't, isn't, you're,",
-    "     they're, that's, etc.). If the source has no chance for one,",
-    "     reshape a sentence so it does.",
-    "  2. At least one sentence under 9 words. Punchy. A fragment is OK.",
-    "  3. At least one sentence of 20+ words for contrast.",
-    "  4. Vary sentence length dramatically — never two in a row of",
-    "     similar length.",
-    "  5. Active voice as the default. Convert \"X is identified\" to",
-    "     \"clinicians find X\" / \"we find X\" wherever it reads natural.",
-    "  6. Cap hedging adverbs (frequently, commonly, often, typically,",
-    "     similarly, routinely, particularly) at ONE for the whole",
-    "     paragraph.",
-    "  7. At most one passive-voice clause per paragraph.",
-    "  8. Add 1-2 concrete specifics where the meaning allows (a real",
-    "     drug, a real number, a year). Only if you are certain the",
-    "     specific is correct for the topic — never invent facts.",
-    "",
-    "VOICE: write like a working professional jotting a draft for a",
-    "colleague, not polishing for publication. Slightly direct,",
-    "occasionally opinionated, plain language. NOT essay style.",
-    "It is fine to start a sentence with \"And\" or \"But\".",
-    "",
-    "PRESERVE:",
-    "  - All factual content from the source.",
-    "  - All technical / medical / scientific terms (drug names,",
-    "    conditions, named protocols).",
-    "  - The original meaning and approximate length.",
-    "  - The original register (don't make formal text casual or",
-    "    casual text formal — but make BOTH more human).",
-    "",
-    "FORBIDDEN:",
-    "  - Inventing facts not in the source.",
-    "  - Changing the topic.",
-    "  - Adding any preamble, header, label, or explanation.",
-    "  - Wrapping the output in quotation marks.",
-    "",
-    "OUTPUT: only the rewritten text. Nothing else.",
-  ].join("\n");
+const HUMANIZE_SYSTEM_PROMPT=[
+  "You are rewriting AI-generated text so that GPTZero and other AI",
+  "detectors classify it as human-written. Your goal: score under 30%",
+  "AI on GPTZero.",
+  "",
+  "HARD BAN — never use any of these words or phrases in your output.",
+  "If the original uses them, replace with a plain alternative or just",
+  "drop the sentence and rewrite the meaning:",
+  "  cutting-edge, state-of-the-art, innovative, innovation,",
+  "  framework, ecosystem, landscape, tapestry, paradigm,",
+  "  streamline, facilitate, leverage, harness, navigate, empower,",
+  "  robust, comprehensive, seamless, data-driven, holistic, dynamic,",
+  "  plays a critical role, plays a vital role, plays a key role,",
+  "  in today's world, in the realm of, in the world of,",
+  "  moreover, furthermore, additionally, consequently, ultimately,",
+  "  it is important to note, it is worth noting, it should be noted,",
+  "  delve into, shed light on, dive into, navigate the complexities,",
+  "  rich tapestry, ever-evolving, fast-paced, game-changer,",
+  "  em-dashes (—). Use commas or periods instead.",
+  "",
+  "REQUIRED in your output:",
+  "  1. At least 2 contractions (it's, don't, won't, isn't, you're,",
+  "     they're, that's, etc.). If the source has no chance for one,",
+  "     reshape a sentence so it does.",
+  "  2. At least one sentence under 9 words. Punchy. A fragment is OK.",
+  "  3. At least one sentence of 20+ words for contrast.",
+  "  4. Vary sentence length dramatically — never two in a row of",
+  "     similar length.",
+  "  5. Active voice as the default. Convert \"X is identified\" to",
+  "     \"clinicians find X\" / \"we find X\" wherever it reads natural.",
+  "  6. Cap hedging adverbs (frequently, commonly, often, typically,",
+  "     similarly, routinely, particularly) at ONE for the whole",
+  "     paragraph.",
+  "  7. At most one passive-voice clause per paragraph.",
+  "  8. Add 1-2 concrete specifics where the meaning allows (a real",
+  "     drug, a real number, a year). Only if you are certain the",
+  "     specific is correct for the topic — never invent facts.",
+  "",
+  "VOICE: write like a working professional jotting a draft for a",
+  "colleague, not polishing for publication. Slightly direct,",
+  "occasionally opinionated, plain language. NOT essay style.",
+  "It is fine to start a sentence with \"And\" or \"But\".",
+  "",
+  "PRESERVE:",
+  "  - All factual content from the source.",
+  "  - All technical / medical / scientific terms (drug names,",
+  "    conditions, named protocols).",
+  "  - The original meaning and approximate length.",
+  "  - The original register (don't make formal text casual or",
+  "    casual text formal — but make BOTH more human).",
+  "",
+  "FORBIDDEN:",
+  "  - Inventing facts not in the source.",
+  "  - Changing the topic.",
+  "  - Adding any preamble, header, label, or explanation.",
+  "  - Wrapping the output in quotation marks.",
+  "",
+  "OUTPUT: only the rewritten text. Nothing else.",
+].join("\n");
 
+const REFINE_SYSTEM_PROMPT=[
+  "You are critiquing and refining your own previous rewrite of",
+  "AI-generated text. Goal: produce a tighter version that GPTZero",
+  "will score even lower on AI-likelihood.",
+  "",
+  "Scan the FIRST REWRITE below for any residual AI tells, then",
+  "rewrite again to remove them:",
+  "  - AI-cliche vocabulary that slipped through (framework, streamline,",
+  "    robust, comprehensive, seamless, data-driven, holistic, dynamic,",
+  "    cutting-edge, plays a critical/vital/key role, etc.)",
+  "  - Two or more consecutive sentences of similar length",
+  "  - Missing contractions (it is, do not, cannot, will not, ...)",
+  "  - Formulaic transitions (Moreover, Furthermore, Additionally,",
+  "    In conclusion, In summary)",
+  "  - More than one hedging adverb per paragraph (frequently, commonly,",
+  "    often, typically, similarly, routinely, particularly)",
+  "  - Passive / stative voice in more than one sentence",
+  "  - Any em-dash",
+  "  - No sentence under 9 words (need at least one short / punchy one)",
+  "  - No sentence over 20 words (need at least one longer one)",
+  "",
+  "Apply the same HARD BAN list and the same REQUIRED idiosyncrasies",
+  "as the first pass. Preserve all factual content, all technical /",
+  "medical / scientific terms, the original meaning, and the original",
+  "register.",
+  "",
+  "OUTPUT: only the improved rewrite. No critique commentary, no",
+  "preamble, no labels, no quotation marks.",
+].join("\n");
+
+async function claudeMessage(apiKey,model,system,user){
   const r=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{
@@ -675,8 +705,8 @@ async function callClaudeAPI(apiKey,model,text){
     body:JSON.stringify({
       model,
       max_tokens:4096,
-      system:systemPrompt,
-      messages:[{role:"user",content:"TEXT TO REWRITE:\n\n"+text}],
+      system,
+      messages:[{role:"user",content:user}],
     }),
   });
   if(!r.ok){
@@ -690,6 +720,18 @@ async function callClaudeAPI(apiKey,model,text){
   }
   return data.content[0].text.trim();
 }
+
+async function callClaudeAPI(apiKey,model,text,twoPass,onProgress){
+  if(onProgress)onProgress({pass:1,total:twoPass?2:1});
+  const first=await claudeMessage(apiKey,model,HUMANIZE_SYSTEM_PROMPT,
+    "TEXT TO REWRITE:\n\n"+text);
+  if(!twoPass)return first;
+  if(onProgress)onProgress({pass:2,total:2});
+  const second=await claudeMessage(apiKey,model,REFINE_SYSTEM_PROMPT,
+    "ORIGINAL TEXT:\n"+text+"\n\nFIRST REWRITE (improve this):\n"+first);
+  return second;
+}
+
 
 const SAMPLE=
   "In today's world, leveraging cutting-edge technology plays a crucial "+
@@ -717,15 +759,19 @@ export default function Humanizer(){
   const [rawBackup,setRawBackup]=useState(null);
   const [apiKey,setApiKey]=useState("");
   const [llmModel,setLlmModel]=useState("claude-sonnet-4-6");
+  const [useTwoPass,setUseTwoPass]=useState(true);
   const [autoError,setAutoError]=useState("");
 
-  /* Load saved key/model from localStorage on mount; persist on change. */
+  /* Load saved key/model/two-pass from localStorage on mount;
+     persist on every change. */
   useEffect(()=>{
     try{
       const k=localStorage.getItem("humanizer_anthropic_key");
       if(k)setApiKey(k);
       const m=localStorage.getItem("humanizer_anthropic_model");
       if(m)setLlmModel(m);
+      const tp=localStorage.getItem("humanizer_two_pass");
+      if(tp!==null)setUseTwoPass(tp==="1");
     }catch(_){}
   },[]);
   useEffect(()=>{
@@ -737,6 +783,9 @@ export default function Humanizer(){
   useEffect(()=>{
     try{localStorage.setItem("humanizer_anthropic_model",llmModel);}catch(_){}
   },[llmModel]);
+  useEffect(()=>{
+    try{localStorage.setItem("humanizer_two_pass",useTwoPass?"1":"0");}catch(_){}
+  },[useTwoPass]);
 
   /* current working text = raw with all swaps applied */
   const tokens=useMemo(()=>tokenize(raw),[raw]);
@@ -844,13 +893,15 @@ export default function Humanizer(){
        actually restructures sentences instead of swapping words. */
     if(apiKey){
       try{
-        setAutoProgress({done:0,total:1});
-        const rewritten=await callClaudeAPI(apiKey,llmModel,raw);
+        const total=useTwoPass?2:1;
+        setAutoProgress({done:0,total});
+        const rewritten=await callClaudeAPI(apiKey,llmModel,raw,useTwoPass,
+          p=>setAutoProgress({done:p.pass-1,total:p.total}));
         setRawBackup(raw);
         setRaw(rewritten);
         setSwaps({});setPhraseSwaps({});
         setActive(null);setActivePhrase(null);setOpenSentence(null);
-        setAutoProgress({done:1,total:1});
+        setAutoProgress({done:total,total});
       }catch(e){
         setAutoError("Claude API error: "+(e.message||String(e)));
       }finally{
@@ -935,7 +986,7 @@ export default function Humanizer(){
     setActive(null);setActivePhrase(null);setOpenSentence(null);
     setAutoBusy(false);
     setAutoProgress({done:0,total:0});
-  },[autoBusy,apiKey,llmModel,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
+  },[autoBusy,apiKey,llmModel,useTwoPass,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
 
   const undoAuto=useCallback(()=>{
     if(rawBackup===null)return;
@@ -1155,6 +1206,16 @@ export default function Humanizer(){
               </select>
             )}
           </div>
+          {apiKey&&(
+            <label style={S.twoPassRow}>
+              <input type="checkbox" checked={useTwoPass}
+                onChange={e=>setUseTwoPass(e.target.checked)}
+                disabled={autoBusy}/>
+              <span><strong>2-pass refinement</strong> — Claude rewrites,
+                then critiques and tightens its own output.
+                Better humanization, costs 2&times; per click.</span>
+            </label>
+          )}
           <p style={S.llmHint}>
             {apiKey
               ?"Claude will rewrite the text in active voice with varied sentence shapes — the path that actually beats GPTZero. Key stays in your browser only."
@@ -1166,10 +1227,16 @@ export default function Humanizer(){
               disabled={autoBusy}
               onClick={autoHumanize}>
               {autoBusy
-                ?(apiKey?"Calling Claude…":("Humanizing… "+(autoProgress.total
-                    ?Math.round(autoProgress.done/autoProgress.total*100)+"%"
-                    :"")))
-                :(apiKey?"Auto-humanize via Claude":"Auto-humanize (offline)")}
+                ?(apiKey
+                    ?(autoProgress.total>1
+                      ?("Claude pass "+(autoProgress.done+1)+"/"+autoProgress.total+"…")
+                      :"Calling Claude…")
+                    :("Humanizing… "+(autoProgress.total
+                        ?Math.round(autoProgress.done/autoProgress.total*100)+"%"
+                        :"")))
+                :(apiKey
+                    ?("Auto-humanize via Claude"+(useTwoPass?" (2-pass)":""))
+                    :"Auto-humanize (offline)")}
             </button>
             {rawBackup!==null&&(
               <button style={S.btnGhost} onClick={undoAuto} disabled={autoBusy}>
@@ -1936,6 +2003,9 @@ const S={
     fontSize:13,background:"#fff",cursor:"pointer"},
   llmHint:{fontSize:11.5,color:"#64748b",margin:"6px 0 0",lineHeight:1.5,
     fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  twoPassRow:{display:"flex",alignItems:"flex-start",gap:8,marginTop:10,
+    fontSize:12.5,color:"#334155",lineHeight:1.5,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif",cursor:"pointer"},
   errBox:{marginTop:10,padding:"8px 12px",border:"1px solid #fca5a5",
     background:"#fef2f2",borderRadius:7,fontSize:12.5,color:"#991b1b",
     fontFamily:"ui-monospace, monospace",wordBreak:"break-word"},

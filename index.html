@@ -616,6 +616,63 @@ function assembleText(tokens,swaps,phraseSwaps,phraseByStart){
   return res.replace(/\s{2,}/g," ").replace(/\s+([.,;:])/g,"$1");
 }
 
+/* ================================================================
+   CLAUDE API CALL — the LLM-powered rewrite path. When the user has
+   pasted an Anthropic API key, autoHumanize routes through this
+   instead of the offline transforms. The key never leaves the
+   browser; the call goes direct to api.anthropic.com.
+   ================================================================ */
+async function callClaudeAPI(apiKey,model,text){
+  const prompt="Rewrite the following text in natural, varied human "+
+    "English to lower its AI-detection score on tools like GPTZero. "+
+    "Specifically:\n\n"+
+    "- Convert passive / stative voice (\"X is identified\") to active "+
+    "voice (\"clinicians find X\") wherever it reads natural.\n"+
+    "- Vary sentence length dramatically. Mix short fragments with "+
+    "longer sentences. Avoid uniform rhythm.\n"+
+    "- Use contractions (it is -> it's, do not -> don't, cannot -> "+
+    "can't).\n"+
+    "- Strip formulaic transitions (Moreover, Furthermore, In "+
+    "conclusion, It is important to note that, ...).\n"+
+    "- Avoid stacking hedging adverbs (frequently, commonly, often, "+
+    "typically, similarly). Pick at most one per sentence.\n"+
+    "- Replace em-dashes with commas or periods.\n"+
+    "- Add concrete specifics (numbers, named conditions, real "+
+    "examples) where the meaning allows.\n"+
+    "- Keep ALL factual content, technical terms (medical / legal / "+
+    "scientific jargon), and the original meaning intact.\n"+
+    "- Match the original register (formal stays formal, casual "+
+    "casual).\n\n"+
+    "Output ONLY the rewritten text. No preamble, no explanation, "+
+    "no surrounding quotation marks.\n\n"+
+    "TEXT TO REWRITE:\n"+text;
+
+  const r=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "x-api-key":apiKey,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true",
+    },
+    body:JSON.stringify({
+      model,
+      max_tokens:4096,
+      messages:[{role:"user",content:prompt}],
+    }),
+  });
+  if(!r.ok){
+    let detail="";
+    try{detail=(await r.text()).slice(0,400);}catch(_){}
+    throw new Error("HTTP "+r.status+(detail?": "+detail:""));
+  }
+  const data=await r.json();
+  if(!data.content||!data.content[0]||!data.content[0].text){
+    throw new Error("Unexpected response: "+JSON.stringify(data).slice(0,200));
+  }
+  return data.content[0].text.trim();
+}
+
 const SAMPLE=
   "In today's world, leveraging cutting-edge technology plays a crucial "+
   "role in the realm of healthcare. It is important to note that a "+
@@ -640,6 +697,28 @@ function Humanizer(){
   const [autoBusy,setAutoBusy]=useState(false);
   const [autoProgress,setAutoProgress]=useState({done:0,total:0});
   const [rawBackup,setRawBackup]=useState(null);
+  const [apiKey,setApiKey]=useState("");
+  const [llmModel,setLlmModel]=useState("claude-sonnet-4-6");
+  const [autoError,setAutoError]=useState("");
+
+  /* Load saved key/model from localStorage on mount; persist on change. */
+  useEffect(()=>{
+    try{
+      const k=localStorage.getItem("humanizer_anthropic_key");
+      if(k)setApiKey(k);
+      const m=localStorage.getItem("humanizer_anthropic_model");
+      if(m)setLlmModel(m);
+    }catch(_){}
+  },[]);
+  useEffect(()=>{
+    try{
+      if(apiKey)localStorage.setItem("humanizer_anthropic_key",apiKey);
+      else localStorage.removeItem("humanizer_anthropic_key");
+    }catch(_){}
+  },[apiKey]);
+  useEffect(()=>{
+    try{localStorage.setItem("humanizer_anthropic_model",llmModel);}catch(_){}
+  },[llmModel]);
 
   /* current working text = raw with all swaps applied */
   const tokens=useMemo(()=>tokenize(raw),[raw]);
@@ -740,6 +819,31 @@ function Humanizer(){
   const autoHumanize=useCallback(async()=>{
     if(autoBusy)return;
     setAutoBusy(true);
+    setAutoError("");
+
+    /* If an API key is set, route the whole rewrite through Claude.
+       This is the only path that reliably beats GPTZero, because it
+       actually restructures sentences instead of swapping words. */
+    if(apiKey){
+      try{
+        setAutoProgress({done:0,total:1});
+        const rewritten=await callClaudeAPI(apiKey,llmModel,raw);
+        setRawBackup(raw);
+        setRaw(rewritten);
+        setSwaps({});setPhraseSwaps({});
+        setActive(null);setActivePhrase(null);setOpenSentence(null);
+        setAutoProgress({done:1,total:1});
+      }catch(e){
+        setAutoError("Claude API error: "+(e.message||String(e)));
+      }finally{
+        setAutoBusy(false);
+        setAutoProgress({done:0,total:0});
+      }
+      return;
+    }
+
+    /* No API key — fall back to the offline word/phrase swap +
+       sentence-transform pipeline. */
     const newSwaps={...swaps};
     const newPhraseSwaps={...phraseSwaps};
 
@@ -813,7 +917,7 @@ function Humanizer(){
     setActive(null);setActivePhrase(null);setOpenSentence(null);
     setAutoBusy(false);
     setAutoProgress({done:0,total:0});
-  },[autoBusy,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
+  },[autoBusy,apiKey,llmModel,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
 
   const undoAuto=useCallback(()=>{
     if(rawBackup===null)return;
@@ -1014,16 +1118,40 @@ function Humanizer(){
               <div style={S.metricHint}>higher = more human</div>
             </div>
           </div>
+          <div style={S.llmRow}>
+            <input
+              type="password"
+              value={apiKey}
+              placeholder="sk-ant-… (paste Claude API key for LLM rewriting)"
+              onChange={e=>{setApiKey(e.target.value.trim());setAutoError("");}}
+              style={S.llmKey}
+              autoComplete="off"
+              spellCheck={false}/>
+            {apiKey&&(
+              <select value={llmModel}
+                onChange={e=>setLlmModel(e.target.value)}
+                style={S.llmModel}>
+                <option value="claude-sonnet-4-6">Sonnet 4.6 (best)</option>
+                <option value="claude-haiku-4-5-20251001">Haiku 4.5 (fast)</option>
+                <option value="claude-opus-4-7">Opus 4.7 (max)</option>
+              </select>
+            )}
+          </div>
+          <p style={S.llmHint}>
+            {apiKey
+              ?"Claude will rewrite the text in active voice with varied sentence shapes — the path that actually beats GPTZero. Key stays in your browser only."
+              :"Optional: paste an Anthropic key for real LLM rewriting. Without one, the button uses offline transforms only. Get a key at console.anthropic.com ($5 free credits)."}
+          </p>
           <div style={S.autoRow}>
             <button
               style={{...S.btnAuto,...(autoBusy?S.btnAutoBusy:{})}}
               disabled={autoBusy}
               onClick={autoHumanize}>
               {autoBusy
-                ?("Humanizing… "+(autoProgress.total
+                ?(apiKey?"Calling Claude…":("Humanizing… "+(autoProgress.total
                     ?Math.round(autoProgress.done/autoProgress.total*100)+"%"
-                    :""))
-                :"Auto-humanize all"}
+                    :"")))
+                :(apiKey?"Auto-humanize via Claude":"Auto-humanize (offline)")}
             </button>
             {rawBackup!==null&&(
               <button style={S.btnGhost} onClick={undoAuto} disabled={autoBusy}>
@@ -1034,6 +1162,9 @@ function Humanizer(){
               Reset swaps
             </button>
           </div>
+          {autoError&&(
+            <div style={S.errBox}>{autoError}</div>
+          )}
         </div>
       </section>
 
@@ -1778,6 +1909,18 @@ const S={
     padding:"10px 18px",fontSize:14,fontWeight:700,cursor:"pointer",
     minWidth:170},
   btnAutoBusy:{background:"#64748b",cursor:"wait"},
+  llmRow:{display:"flex",gap:8,marginTop:14,flexWrap:"wrap",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  llmKey:{flex:"1 1 260px",border:"1px solid #cbd5e1",borderRadius:7,
+    padding:"8px 10px",fontSize:13,fontFamily:"ui-monospace, monospace",
+    outline:"none",background:"#fff"},
+  llmModel:{border:"1px solid #cbd5e1",borderRadius:7,padding:"8px 8px",
+    fontSize:13,background:"#fff",cursor:"pointer"},
+  llmHint:{fontSize:11.5,color:"#64748b",margin:"6px 0 0",lineHeight:1.5,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  errBox:{marginTop:10,padding:"8px 12px",border:"1px solid #fca5a5",
+    background:"#fef2f2",borderRadius:7,fontSize:12.5,color:"#991b1b",
+    fontFamily:"ui-monospace, monospace",wordBreak:"break-word"},
   outputCard:{background:"#f8fafc"},
   label:{display:"block",fontSize:12,fontWeight:700,letterSpacing:"0.06em",
     textTransform:"uppercase",color:"#94a3b8",marginBottom:8,

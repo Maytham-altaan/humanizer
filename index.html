@@ -1,0 +1,1548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Humanizer & Detector</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#129302;</text></svg>">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#f1f5f9;}
+  #root{background:#f1f5f9;min-height:100vh;}
+  *{box-sizing:border-box;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useCallback, useRef, useEffect } = React;
+
+/* ================================================================
+   AI HUMANIZER & DETECTOR  —  QuillBot-style analysis
+   ----------------------------------------------------------------
+   Two layers working together:
+
+   1. DETECTOR  — scores the whole text and every sentence for how
+      "AI-written" it reads, using structural signals (not just
+      vocabulary): sentence-length uniformity (burstiness),
+      predictable openers, formulaic structure, hedging, lexical
+      repetition, and AI-favourite vocabulary density. Produces a
+      0-100% AI-likelihood score and a per-sentence verdict
+      (AI / AI-refined / Human) with an explainer for each.
+
+   2. HUMANIZER — word- and phrase-level swapping. Click any flagged
+      term to replace it with a plainer alternative; the rebuilt
+      paragraph and the re-scored percentage update live.
+   ================================================================ */
+
+/* ---------------------------------------------------------------
+   LEXICON  —  weight 3 = very strong AI signal, 2 = strong, 1 = soft
+   --------------------------------------------------------------- */
+const BASE = {
+  delve:{w:3,alt:["look at","dig into","explore","get into"]},
+  intricate:{w:3,alt:["complex","detailed","involved"]},
+  multifaceted:{w:3,alt:["many-sided","complex","varied"]},
+  testament:{w:3,alt:["proof","sign","evidence"]},
+  tapestry:{w:3,alt:["mix","blend","range"]},
+  realm:{w:3,alt:["area","field","world"]},
+  myriad:{w:3,alt:["many","countless","a lot of"]},
+  plethora:{w:3,alt:["plenty of","lots of","many"]},
+  pivotal:{w:3,alt:["key","central","important"]},
+  paradigm:{w:3,alt:["model","pattern","approach"]},
+  synergy:{w:3,alt:["teamwork","combined effect","cooperation"]},
+  paramount:{w:3,alt:["most important","top","key"]},
+  underscore:{w:3,alt:["stress","highlight","point to"]},
+  bolster:{w:3,alt:["boost","strengthen","back up"]},
+  burgeoning:{w:3,alt:["growing","rising","expanding"]},
+  nuanced:{w:3,alt:["subtle","fine","detailed"]},
+  holistic:{w:3,alt:["whole","all-round","complete"]},
+  cornerstone:{w:3,alt:["foundation","basis","core"]},
+  transformative:{w:3,alt:["major","game-changing","big"]},
+  groundbreaking:{w:3,alt:["new","original","major"]},
+  unparalleled:{w:3,alt:["unmatched","the best","rare"]},
+  unprecedented:{w:3,alt:["new","never seen before","rare"]},
+  quintessential:{w:3,alt:["typical","classic","ideal"]},
+  endeavor:{w:3,alt:["effort","attempt","project"]},
+  trajectory:{w:3,alt:["path","direction","course"]},
+  ethos:{w:3,alt:["values","spirit","outlook"]},
+  interplay:{w:3,alt:["interaction","give and take"]},
+  juxtapose:{w:3,alt:["contrast","set side by side"]},
+  ubiquitous:{w:3,alt:["everywhere","widespread","common"]},
+  symbiotic:{w:3,alt:["mutual","shared","two-way"]},
+  unwavering:{w:3,alt:["steady","firm","constant"]},
+  meticulous:{w:3,alt:["careful","thorough","precise"]},
+  esteemed:{w:3,alt:["respected","well-known","valued"]},
+  noteworthy:{w:3,alt:["notable","worth noting","striking"]},
+  profound:{w:3,alt:["deep","strong","serious"]},
+  invaluable:{w:3,alt:["very useful","valuable","helpful"]},
+  indelible:{w:3,alt:["lasting","permanent","memorable"]},
+  steadfast:{w:3,alt:["loyal","firm","reliable"]},
+  leverage:{w:2,alt:["use","apply","make use of","tap into"]},
+  utilize:{w:2,alt:["use"]},
+  facilitate:{w:2,alt:["help","make easier","support","ease"]},
+  showcase:{w:2,alt:["show","highlight","present"]},
+  harness:{w:2,alt:["use","tap into"]},
+  foster:{w:2,alt:["build","support","encourage"]},
+  navigate:{w:2,alt:["handle","deal with","work through"]},
+  streamline:{w:2,alt:["simplify","speed up","tidy up"]},
+  optimize:{w:2,alt:["improve","fine-tune","refine"]},
+  elevate:{w:2,alt:["raise","lift","improve"]},
+  encompass:{w:2,alt:["cover","include"]},
+  exemplify:{w:2,alt:["show","be an example of"]},
+  spearhead:{w:2,alt:["lead","head up"]},
+  unlock:{w:2,alt:["open up","make possible","reveal"]},
+  empower:{w:2,alt:["enable","help","give the means to"]},
+  embark:{w:2,alt:["start","begin"]},
+  cultivate:{w:2,alt:["build","grow","develop"]},
+  amplify:{w:2,alt:["boost","increase","raise"]},
+  illuminate:{w:2,alt:["explain","clarify","shed light on"]},
+  garner:{w:2,alt:["get","gain","collect"]},
+  augment:{w:2,alt:["add to","boost","increase"]},
+  propel:{w:2,alt:["push","drive","move forward"]},
+  reimagine:{w:2,alt:["rethink","redesign"]},
+  delineate:{w:2,alt:["describe","outline","set out"]},
+  curate:{w:2,alt:["choose","select","gather"]},
+  pioneer:{w:2,alt:["start","lead","introduce"]},
+  resonate:{w:2,alt:["connect","strike a chord","click"]},
+  robust:{w:2,alt:["strong","solid","reliable"]},
+  seamless:{w:2,alt:["smooth","easy"]},
+  comprehensive:{w:2,alt:["full","complete","thorough","detailed"]},
+  innovative:{w:2,alt:["new","fresh","original"]},
+  remarkable:{w:2,alt:["notable","striking","impressive"]},
+  vast:{w:2,alt:["wide","large","big"]},
+  dynamic:{w:2,alt:["changing","active","lively"]},
+  versatile:{w:2,alt:["flexible","adaptable","all-purpose"]},
+  compelling:{w:2,alt:["convincing","strong","interesting"]},
+  vibrant:{w:2,alt:["lively","bright","active"]},
+  tailored:{w:2,alt:["customized","fitted","suited"]},
+  bespoke:{w:2,alt:["custom","made-to-order"]},
+  crucial:{w:2,alt:["important","key","vital"]},
+  vital:{w:2,alt:["important","key","essential"]},
+  essential:{w:2,alt:["needed","key","necessary"]},
+  significant:{w:2,alt:["large","notable","important"]},
+  substantial:{w:2,alt:["large","big","sizeable"]},
+  diverse:{w:2,alt:["varied","different","mixed"]},
+  rich:{w:2,alt:["full","deep","detailed"]},
+  landscape:{w:2,alt:["field","area","scene"]},
+  ecosystem:{w:2,alt:["network","system","environment"]},
+  framework:{w:2,alt:["structure","system","approach"]},
+  insight:{w:2,alt:["finding","takeaway","point"]},
+  potential:{w:2,alt:["promise","possibility"]},
+  capability:{w:2,alt:["ability","feature","skill"]},
+  solution:{w:2,alt:["fix","answer","approach"]},
+  moreover:{w:2,alt:["also","and","on top of that"]},
+  furthermore:{w:2,alt:["also","and","plus"]},
+  additionally:{w:2,alt:["also","and","as well"]},
+  consequently:{w:2,alt:["so","as a result","therefore"]},
+  subsequently:{w:2,alt:["then","later","after that"]},
+  ultimately:{w:2,alt:["in the end","finally","at last"]},
+  essentially:{w:2,alt:["basically","in short","really"]},
+  notably:{w:2,alt:["in particular","especially"]},
+  hence:{w:2,alt:["so","therefore","for that reason"]},
+  thereby:{w:2,alt:["so","in doing so"]},
+  whilst:{w:2,alt:["while"]},
+  amongst:{w:2,alt:["among"]},
+  arguably:{w:2,alt:["perhaps","possibly","you could say"]},
+  aforementioned:{w:2,alt:["above","earlier","that"]},
+  notwithstanding:{w:2,alt:["despite this","even so"]},
+  enhance:{w:1,alt:["improve","boost","lift"]},
+  ensure:{w:1,alt:["make sure","see to it"]},
+  effective:{w:1,alt:["useful","working","good"]},
+  valuable:{w:1,alt:["useful","helpful","worthwhile"]},
+  numerous:{w:1,alt:["many","lots of","several"]},
+  various:{w:1,alt:["several","different","many"]},
+  demonstrate:{w:1,alt:["show","prove"]},
+  highlight:{w:1,alt:["point out","stress","show"]},
+  significantly:{w:1,alt:["a lot","greatly","notably"]},
+  indeed:{w:1,alt:["in fact","really","truly"]},
+  overall:{w:1,alt:["in short","all in all","on the whole"]},
+  importantly:{w:1,alt:["worth noting","to be clear"]},
+  particularly:{w:1,alt:["especially","above all"]},
+  approximately:{w:1,alt:["about","around","roughly"]},
+  prior:{w:1,alt:["earlier","before"]},
+  obtain:{w:1,alt:["get"]},
+  commence:{w:1,alt:["start","begin"]},
+  additional:{w:1,alt:["extra","more"]},
+  individuals:{w:1,alt:["people"]},
+  assist:{w:1,alt:["help"]},
+  require:{w:1,alt:["need"]},
+};
+
+const PHRASES = {
+  "in today's world":{w:3,alt:["these days","right now","currently"]},
+  "in the realm of":{w:3,alt:["in","within","in the field of"]},
+  "it is important to note":{w:3,alt:["note that","keep in mind"]},
+  "it's important to note":{w:3,alt:["note that","keep in mind"]},
+  "it is worth noting":{w:3,alt:["note that","worth noting"]},
+  "plays a crucial role":{w:3,alt:["matters a lot","is important"]},
+  "play a crucial role":{w:3,alt:["matter a lot","are important"]},
+  "plays a vital role":{w:3,alt:["matters a lot","is important"]},
+  "a wide range of":{w:2,alt:["many","lots of","various"]},
+  "a variety of":{w:2,alt:["several","many","different"]},
+  "a myriad of":{w:3,alt:["many","countless"]},
+  "a plethora of":{w:3,alt:["plenty of","lots of"]},
+  "when it comes to":{w:2,alt:["with","for","regarding"]},
+  "in order to":{w:2,alt:["to"]},
+  "due to the fact that":{w:3,alt:["because","since"]},
+  "in conclusion":{w:2,alt:["to sum up","to wrap up","finally"]},
+  "last but not least":{w:2,alt:["finally","lastly"]},
+  "rich tapestry":{w:3,alt:["mix","blend"]},
+  "ever-evolving":{w:3,alt:["changing","shifting"]},
+  "ever-changing":{w:3,alt:["changing","shifting"]},
+  "fast-paced":{w:2,alt:["busy","hectic","quick"]},
+  "game-changer":{w:3,alt:["big change","turning point"]},
+  "game changer":{w:3,alt:["big change","turning point"]},
+  "at the forefront of":{w:3,alt:["leading","ahead in"]},
+  "shed light on":{w:2,alt:["explain","clarify"]},
+  "delve into":{w:3,alt:["look at","explore"]},
+  "dive into":{w:2,alt:["look at","explore"]},
+  "first and foremost":{w:2,alt:["first","above all"]},
+  "needless to say":{w:2,alt:["clearly","of course"]},
+  "the fact that":{w:1,alt:["that"]},
+  "in terms of":{w:1,alt:["for","with"]},
+  "as a result of":{w:1,alt:["because of","from"]},
+  "with regard to":{w:2,alt:["about","on"]},
+  "a testament to":{w:3,alt:["proof of","a sign of"]},
+  "stand the test of time":{w:3,alt:["last","endure"]},
+  "the world of":{w:2,alt:["the field of"]},
+  "push the boundaries":{w:3,alt:["go further","break new ground"]},
+  "unlock the potential":{w:3,alt:["make the most of","tap the promise"]},
+  "harness the power":{w:3,alt:["use the power","tap the power"]},
+};
+
+/* sentence openers AI overuses heavily */
+const AI_OPENERS = [
+  "moreover","furthermore","additionally","however","in conclusion",
+  "in summary","overall","ultimately","notably","importantly",
+  "first","firstly","second","secondly","third","thirdly","finally",
+  "in today's","in the world","as we","it is important","it's important",
+  "in this","this","these","there are","there is","one of the",
+];
+
+/* hedging / filler phrases that inflate AI-likelihood */
+const HEDGES = [
+  "it is important to","it's important to","it is worth","it should be noted",
+  "plays a role","plays a crucial","plays a vital","plays a key",
+  "when it comes to","in order to","a wide range","a variety of",
+  "not only","but also","as well as","ranging from","whether it",
+];
+
+function expand(base){
+  const out={};
+  for(const[word,def]of Object.entries(base)){
+    out[word]=def;
+    const{w,alt}=def;
+    const forms=new Set();
+    if(/[^s]$/.test(word))forms.add(word+"s");
+    if(/e$/.test(word)){forms.add(word.slice(0,-1)+"ing");forms.add(word+"d");}
+    else{forms.add(word+"ing");forms.add(word+"ed");}
+    if(/[^y]$/.test(word)&&!/ly$/.test(word))forms.add(word+"ly");
+    for(const f of forms)if(!out[f]&&!base[f])out[f]={w,alt};
+  }
+  return out;
+}
+const LEXICON=expand(BASE);
+const WEIGHT_LABEL={3:"very AI-like",2:"AI-leaning",1:"soft flag"};
+
+/* ---------------------------------------------------------------
+   TOKENISER  — words + gaps, so the text rebuilds exactly
+   --------------------------------------------------------------- */
+function tokenize(text){
+  const tokens=[];
+  const re=/([A-Za-z][A-Za-z'\u2019-]*)|([^A-Za-z]+)/g;
+  let m,id=0;
+  while((m=re.exec(text))!==null){
+    if(m[1]!==undefined){
+      const word=m[1];
+      const clean=word.toLowerCase().replace(/['\u2019]/g,"'").replace(/-/g,"");
+      const cleanHyphen=word.toLowerCase().replace(/['\u2019]/g,"'");
+      const def=LEXICON[clean]||LEXICON[cleanHyphen];
+      tokens.push({id:id++,type:"word",text:word,clean,cleanHyphen,
+        score:def?def.w:0,alt:def?def.alt:null});
+    }else{
+      tokens.push({id:id++,type:"gap",text:m[2]});
+    }
+  }
+  return tokens;
+}
+
+function detectPhrases(tokens){
+  const wordIdx=tokens.map((t,i)=>(t.type==="word"?i:-1)).filter(i=>i>=0);
+  const hits=[];const used=new Set();
+  for(let p=0;p<wordIdx.length;p++){
+    for(let len=6;len>=2;len--){
+      if(p+len>wordIdx.length)continue;
+      const slice=[];
+      for(let k=0;k<len;k++)slice.push(wordIdx[p+k]);
+      if(slice.some(i=>used.has(i)))continue;
+      const startTok=slice[0],endTok=slice[len-1];
+      const phraseText=tokens.slice(startTok,endTok+1).map(t=>t.text).join("")
+        .toLowerCase().replace(/['\u2019]/g,"'").trim();
+      const def=PHRASES[phraseText];
+      if(def){hits.push({startTok,endTok,def,key:phraseText});
+        slice.forEach(i=>used.add(i));break;}
+    }
+  }
+  return hits;
+}
+
+/* ---------------------------------------------------------------
+   SENTENCE SPLITTER  — keeps character offsets for highlighting
+   --------------------------------------------------------------- */
+function splitSentences(text){
+  const out=[];
+  const re=/[^.!?]+[.!?]+(?:["'\u2019\u201d)\]]*)|[^.!?]+$/g;
+  let m;
+  while((m=re.exec(text))!==null){
+    const raw=m[0];
+    if(raw.trim().length===0)continue;
+    out.push({raw,start:m.index,end:m.index+raw.length});
+  }
+  if(out.length===0&&text.trim().length)
+    out.push({raw:text,start:0,end:text.length});
+  return out;
+}
+
+/* ---------------------------------------------------------------
+   SENTENCE SCORING  — the core detector heuristic
+   Returns {score 0-100, signals:[{label,detail,pts}], wordCount}
+   --------------------------------------------------------------- */
+function scoreSentence(sentence,allLengths,idx){
+  const words=(sentence.toLowerCase().match(/[a-z][a-z'\u2019-]*/g)||[]);
+  const wc=words.length;
+  const signals=[];
+  let pts=0;
+
+  /* 1. AI-vocabulary density */
+  let lexHits=0,lexWeight=0;
+  words.forEach(w=>{
+    const c=w.replace(/['\u2019]/g,"'").replace(/-/g,"");
+    const d=LEXICON[c]||LEXICON[w.replace(/['\u2019]/g,"'")];
+    if(d){lexHits++;lexWeight+=d.w;}
+  });
+  if(lexHits>0){
+    const density=lexWeight/Math.max(wc,1);
+    /* density component + a flat bump per flagged term so a few
+       strong buzzwords register even in a longer sentence */
+    const p=Math.min(40,Math.round(density*78)+Math.min(12,lexHits*3));
+    pts+=p;
+    signals.push({label:"AI-favoured vocabulary",
+      detail:lexHits+" flagged term"+(lexHits>1?"s":"")+" in this sentence",
+      pts:p});
+  }
+
+  /* 2. predictable opener */
+  const low=sentence.trim().toLowerCase();
+  const opener=AI_OPENERS.find(o=>low.startsWith(o+" ")||low.startsWith(o+","));
+  if(opener){
+    pts+=12;
+    signals.push({label:"Formulaic opener",
+      detail:"starts with \u201c"+opener+"\u201d \u2014 a common AI sentence opener",
+      pts:12});
+  }
+
+  /* 3. hedging / filler */
+  let hedgeHits=0;
+  HEDGES.forEach(h=>{if(low.includes(h))hedgeHits++;});
+  if(hedgeHits>0){
+    const p=Math.min(16,hedgeHits*9);
+    pts+=p;
+    signals.push({label:"Hedging / filler phrasing",
+      detail:hedgeHits+" filler construction"+(hedgeHits>1?"s":""),pts:p});
+  }
+
+  /* 4. sentence length vs. the document — uniformity & long-windedness */
+  if(allLengths.length>=3){
+    const mean=allLengths.reduce((a,b)=>a+b,0)/allLengths.length;
+    const variance=allLengths.reduce((a,b)=>a+(b-mean)*(b-mean),0)/allLengths.length;
+    const sd=Math.sqrt(variance);
+    /* low burstiness across the doc: every sentence close to the mean */
+    if(sd<6&&allLengths.length>=4){
+      pts+=10;
+      signals.push({label:"Uniform rhythm",
+        detail:"all sentences are a similar length \u2014 low \u201cburstiness\u201d",
+        pts:10});
+    }
+    /* this sentence very close to mean while doc is uniform */
+    if(wc>26){
+      pts+=8;
+      signals.push({label:"Long, dense sentence",
+        detail:wc+" words \u2014 AI tends to pack clauses together",pts:8});
+    }
+  }
+
+  /* 5. parallel "X, Y, and Z" triadic list — an AI tell */
+  const commaCount=(sentence.match(/,/g)||[]).length;
+  if(commaCount>=2&&/\band\b/.test(low)){
+    pts+=7;
+    signals.push({label:"Triadic list structure",
+      detail:"balanced \u201cA, B, and C\u201d listing \u2014 a frequent AI pattern",
+      pts:7});
+  }
+
+  /* 6. no concrete detail — no digits, no proper specifics */
+  const hasNumber=/\d/.test(sentence);
+  if(wc>=12&&!hasNumber){
+    pts+=4;
+    signals.push({label:"No concrete detail",
+      detail:"no numbers or specifics \u2014 reads generic",pts:4});
+  }
+
+  const score=Math.max(0,Math.min(100,pts));
+  return {score,signals,wordCount:wc};
+}
+
+/* verdict bucket from a sentence score */
+function verdictOf(score){
+  if(score>=55)return{key:"ai",label:"Likely AI",cls:"sv-ai"};
+  if(score>=28)return{key:"refined",label:"AI-refined",cls:"sv-refined"};
+  return{key:"human",label:"Likely human",cls:"sv-human"};
+}
+
+function matchCase(original,replacement){
+  if(!replacement)return replacement;
+  if(original===original.toUpperCase()&&original.length>1)
+    return replacement.toUpperCase();
+  if(original[0]===original[0].toUpperCase())
+    return replacement[0].toUpperCase()+replacement.slice(1);
+  return replacement;
+}
+
+const SAMPLE=
+  "In today's world, leveraging cutting-edge technology plays a crucial "+
+  "role in the realm of healthcare. It is important to note that a "+
+  "comprehensive and robust framework can facilitate seamless workflows, "+
+  "ultimately empowering clinicians to navigate an ever-evolving "+
+  "landscape. Moreover, this groundbreaking approach fosters a rich "+
+  "tapestry of meticulous, data-driven solutions. Furthermore, it "+
+  "underscores the pivotal interplay between innovation and patient care.";
+
+/* ================================================================
+   MAIN COMPONENT
+   ================================================================ */
+function Humanizer(){
+  const [raw,setRaw]=useState(SAMPLE);
+  const [swaps,setSwaps]=useState({});
+  const [phraseSwaps,setPhraseSwaps]=useState({});
+  const [active,setActive]=useState(null);
+  const [activePhrase,setActivePhrase]=useState(null);
+  const [minWeight,setMinWeight]=useState(1);
+  const [tab,setTab]=useState("detector"); // detector | humanizer
+  const [openSentence,setOpenSentence]=useState(null);
+
+  /* current working text = raw with all swaps applied */
+  const tokens=useMemo(()=>tokenize(raw),[raw]);
+  const phrases=useMemo(()=>detectPhrases(tokens),[tokens]);
+
+  const {phraseByStart,coveredByPhrase}=useMemo(()=>{
+    const byStart={},covered={};
+    phrases.forEach(ph=>{
+      if(ph.def.w<minWeight)return;
+      byStart[ph.startTok]=ph;
+      for(let i=ph.startTok;i<=ph.endTok;i++)covered[i]=ph;
+    });
+    return{phraseByStart:byStart,coveredByPhrase:covered};
+  },[phrases,minWeight]);
+
+  const workingText=useMemo(()=>{
+    let res="",i=0;
+    while(i<tokens.length){
+      const t=tokens[i];
+      const ph=phraseByStart[i];
+      if(ph&&phraseSwaps[ph.startTok+"-"+ph.endTok]!==undefined){
+        res+=phraseSwaps[ph.startTok+"-"+ph.endTok];
+        i=ph.endTok+1;continue;
+      }
+      res+=t.type==="word"?(swaps[t.id]??t.text):t.text;
+      i++;
+    }
+    return res.replace(/\s{2,}/g," ").replace(/\s+([.,;:])/g,"$1");
+  },[tokens,swaps,phraseSwaps,phraseByStart]);
+
+  /* ---- DETECTOR analysis over the working text ---- */
+  const analysis=useMemo(()=>{
+    const sents=splitSentences(workingText);
+    const lengths=sents.map(s=>
+      (s.raw.toLowerCase().match(/[a-z][a-z'\u2019-]*/g)||[]).length);
+    const scored=sents.map((s,i)=>{
+      const r=scoreSentence(s.raw,lengths,i);
+      return {...s,...r,idx:i,verdict:verdictOf(r.score)};
+    });
+    const totalWords=lengths.reduce((a,b)=>a+b,0)||1;
+    /* document score = word-weighted mean of sentence scores,
+       nudged up if many sentences are AI and rhythm is uniform */
+    let weighted=0;
+    scored.forEach(s=>{weighted+=s.score*Math.max(s.wordCount,1);});
+    let docScore=weighted/totalWords;
+    const aiCount=scored.filter(s=>s.verdict.key==="ai").length;
+    if(aiCount>=Math.ceil(scored.length/2)&&scored.length>=3)docScore+=8;
+    docScore=Math.max(0,Math.min(100,Math.round(docScore)));
+    const counts={
+      ai:scored.filter(s=>s.verdict.key==="ai").length,
+      refined:scored.filter(s=>s.verdict.key==="refined").length,
+      human:scored.filter(s=>s.verdict.key==="human").length,
+    };
+    return {sents:scored,docScore,counts,totalWords,
+            sentenceCount:scored.length};
+  },[workingText]);
+
+  /* document verdict label */
+  const docVerdict=useMemo(()=>{
+    const s=analysis.docScore;
+    if(s>=60)return{label:"Likely AI-generated",cls:"big-ai"};
+    if(s>=30)return{label:"Possibly AI-refined",cls:"big-refined"};
+    return{label:"Likely human-written",cls:"big-human"};
+  },[analysis.docScore]);
+
+  const reset=useCallback(()=>{
+    setSwaps({});setPhraseSwaps({});
+    setActive(null);setActivePhrase(null);setOpenSentence(null);
+  },[]);
+
+  const stats=useMemo(()=>{
+    let w3=0,w2=0,w1=0,words=0;
+    tokens.forEach(t=>{
+      if(t.type!=="word")return;
+      words++;
+      if(coveredByPhrase[t.id])return;
+      if(t.score===3)w3++;else if(t.score===2)w2++;else if(t.score===1)w1++;
+    });
+    const pw=Object.keys(phraseByStart).length;
+    const flagged=(minWeight<=3?w3:0)+(minWeight<=2?w2:0)+
+                  (minWeight<=1?w1:0)+pw;
+    return{w3,w2,w1,words,flagged,
+      swapped:Object.keys(swaps).length+Object.keys(phraseSwaps).length};
+  },[tokens,swaps,phraseSwaps,phraseByStart,coveredByPhrase,minWeight]);
+
+  const copyOutput=()=>navigator.clipboard&&navigator.clipboard.writeText(workingText);
+
+  /* -------- HUMANIZER canvas (word/phrase swapping) -------- */
+  /* render a single word or phrase token as a clickable span */
+  function renderWordToken(i){
+    const t=tokens[i];
+    const ph=phraseByStart[i];
+    if(ph){
+      const pkey=ph.startTok+"-"+ph.endTok;
+      const swapped=phraseSwaps[pkey]!==undefined;
+      const original=tokens.slice(ph.startTok,ph.endTok+1).map(x=>x.text).join("");
+      const cls=swapped?"tok swapped":ph.def.w===3?"tok w3":"tok w2";
+      return {
+        node:(
+          <span key={"p"+i} style={{position:"relative"}}>
+            <span className={cls}
+              onClick={()=>setActivePhrase(activePhrase===pkey?null:pkey)}>
+              {swapped?phraseSwaps[pkey]:original}
+            </span>
+            {activePhrase===pkey&&(
+              <Popover label={original} weight={ph.def.w} alts={ph.def.alt}
+                swapped={swapped}
+                onPick={v=>{setPhraseSwaps(s=>({...s,[pkey]:v}));setActivePhrase(null);}}
+                onUndo={()=>{setPhraseSwaps(s=>{const n={...s};delete n[pkey];return n;});setActivePhrase(null);}}
+                onClose={()=>setActivePhrase(null)}/>
+            )}
+          </span>
+        ),
+        next:ph.endTok+1,
+      };
+    }
+    if(t.type!=="word")return {node:<span key={i}>{t.text}</span>,next:i+1};
+    const swapped=swaps[t.id]!==undefined;
+    const flagged=t.score>=minWeight;
+    const cls=swapped?"tok swapped"
+            :flagged&&t.score===3?"tok w3"
+            :flagged&&t.score===2?"tok w2"
+            :flagged?"tok w1":"tok plain";
+    return {
+      node:(
+        <span key={i} style={{position:"relative"}}>
+          <span className={cls}
+            onClick={()=>setActive(active===t.id?null:t.id)}>
+            {swapped?swaps[t.id]:t.text}
+          </span>
+          {active===t.id&&(
+            <Popover label={t.text} weight={t.score} alts={t.alt||[]}
+              swapped={swapped}
+              onPick={v=>{setSwaps(s=>({...s,[t.id]:matchCase(t.text,v)}));setActive(null);}}
+              onUndo={()=>{setSwaps(s=>{const n={...s};delete n[t.id];return n;});setActive(null);}}
+              onClose={()=>setActive(null)}/>
+          )}
+        </span>
+      ),
+      next:i+1,
+    };
+  }
+
+  /* canvas with EVERY word clickable, optionally tinted by the
+     sentence-level verdict. words map to sentences by character
+     position in the working text. */
+  function renderHumanizerCanvas(showSentenceColor){
+    /* character offset where each token starts in workingText */
+    const tokenOffsets=[];
+    let pos=0;
+    for(let k=0;k<tokens.length;k++){
+      const t=tokens[k];
+      const ph=phraseByStart[k];
+      tokenOffsets[k]=pos;
+      let text;
+      if(ph&&ph.startTok===k&&phraseSwaps[ph.startTok+"-"+ph.endTok]!==undefined){
+        text=phraseSwaps[ph.startTok+"-"+ph.endTok];
+      }else if(t.type==="word"){
+        text=swaps[t.id]??t.text;
+      }else{
+        text=t.text;
+      }
+      pos+=text.length;
+    }
+    /* which sentence covers a given character offset */
+    const sents=analysis.sents;
+    function sentenceAt(offset){
+      for(let s=0;s<sents.length;s++){
+        if(offset>=sents[s].start&&offset<sents[s].end)return sents[s];
+      }
+      return sents.length?sents[sents.length-1]:null;
+    }
+
+    const out=[];
+    let i=0;
+    let groupSent=null;
+    let group=[];
+    const flushGroup=(key)=>{
+      if(group.length===0)return;
+      if(showSentenceColor&&groupSent){
+        const cls="sentbg "+groupSent.verdict.cls;
+        out.push(
+          <span key={"g"+key} className={cls}
+            title={groupSent.verdict.label+" \u2014 "+groupSent.score+"% AI"}>
+            {group}
+          </span>
+        );
+      }else{
+        out.push(<span key={"g"+key}>{group}</span>);
+      }
+      group=[];
+    };
+
+    while(i<tokens.length){
+      const sentHere=sentenceAt(tokenOffsets[i]);
+      if(showSentenceColor&&sentHere!==groupSent){
+        flushGroup(i);
+        groupSent=sentHere;
+      }
+      const {node,next}=renderWordToken(i);
+      group.push(node);
+      i=next;
+    }
+    flushGroup("end");
+    return out;
+  }
+
+  return (
+    <div style={S.page}>
+      <style>{CSS}</style>
+
+      <header style={S.header}>
+        <h1 style={S.title}>AI Humanizer &amp; Detector</h1>
+        <p style={S.sub}>
+          Sentence-level AI scoring plus word-by-word humanizing.
+          Paste text, read the verdict, then swap the flagged parts.
+        </p>
+      </header>
+
+      {/* INPUT */}
+      <section style={S.card}>
+        <label style={S.label}>Your text</label>
+        <textarea style={S.textarea} rows={6} value={raw}
+          placeholder="Paste a paragraph or essay here..."
+          onChange={e=>{
+            setRaw(e.target.value);
+            setSwaps({});setPhraseSwaps({});
+            setActive(null);setActivePhrase(null);setOpenSentence(null);
+          }}/>
+      </section>
+
+      {/* SCORE GAUGE */}
+      <section style={{...S.card,...S.scoreCard}}>
+        <Gauge score={analysis.docScore}/>
+        <div style={S.scoreSide}>
+          <div className={"bigVerdict "+docVerdict.cls}>
+            {docVerdict.label}
+          </div>
+          <p style={S.scoreText}>
+            {analysis.docScore}% of this text reads as AI-written,
+            based on {analysis.sentenceCount} sentence
+            {analysis.sentenceCount!==1?"s":""} and {analysis.totalWords} words.
+          </p>
+          <div style={S.verdictPills}>
+            <Pill n={analysis.counts.ai} label="AI" cls="sv-ai"/>
+            <Pill n={analysis.counts.refined} label="refined" cls="sv-refined"/>
+            <Pill n={analysis.counts.human} label="human" cls="sv-human"/>
+          </div>
+        </div>
+      </section>
+
+      {/* TABS */}
+      <div style={S.tabRow}>
+        <button style={{...S.tab,...(tab==="detector"?S.tabActive:{})}}
+          onClick={()=>setTab("detector")}>Detector</button>
+        <button style={{...S.tab,...(tab==="humanizer"?S.tabActive:{})}}
+          onClick={()=>setTab("humanizer")}>Humanizer</button>
+      </div>
+
+      {/* ---------------- DETECTOR TAB ---------------- */}
+      {tab==="detector"&&(
+        <section style={S.card}>
+          <div style={S.legend}>
+            <Legend cls="sv-ai" txt="likely AI"/>
+            <Legend cls="sv-refined" txt="AI-refined"/>
+            <Legend cls="sv-human" txt="likely human"/>
+          </div>
+          <p style={S.hint}>
+            Sentences are tinted by AI-likelihood &mdash; but every word is
+            clickable, even in sentences rated human. Click any word to
+            swap it; click the verdict badges below for the why.
+          </p>
+          <div style={S.sentCanvas}>
+            {renderHumanizerCanvas(true)}
+          </div>
+          {/* per-sentence explainers, listed below the text */}
+          <div style={S.sentList}>
+            {analysis.sents.map(s=>(
+              <div key={s.idx}>
+                <button
+                  className={"sentRow "+s.verdict.cls}
+                  onClick={()=>setOpenSentence(openSentence===s.idx?null:s.idx)}>
+                  <span className={"sv-tag "+s.verdict.cls}>
+                    {s.verdict.label}
+                  </span>
+                  <span style={S.sentRowScore}>{s.score}% AI</span>
+                  <span style={S.sentRowText}>
+                    {s.raw.trim().slice(0,52)}
+                    {s.raw.trim().length>52?"\u2026":""}
+                  </span>
+                  <span style={S.sentRowChev}>
+                    {openSentence===s.idx?"\u2212":"+"}
+                  </span>
+                </button>
+                {openSentence===s.idx&&(
+                  <div style={S.sentExplain}>
+                    {s.signals.length>0?(
+                      <ul style={S.scList}>
+                        {s.signals.map((sig,k)=>(
+                          <li key={k} style={S.scItem}>
+                            <span style={S.scPts}>+{sig.pts}</span>
+                            <span><strong>{sig.label}.</strong> {sig.detail}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ):(
+                      <p style={S.scNone}>
+                        No strong AI signals &mdash; this sentence reads natural.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={S.detFoot}>
+            <Mini n={analysis.counts.ai} label="AI sentences" tone="ai"/>
+            <Mini n={analysis.counts.refined} label="AI-refined" tone="refined"/>
+            <Mini n={analysis.counts.human} label="human" tone="human"/>
+            <Mini n={stats.flagged} label="flagged words" tone="warn"/>
+          </div>
+        </section>
+      )}
+
+      {/* ---------------- HUMANIZER TAB ---------------- */}
+      {tab==="humanizer"&&(
+        <>
+          <div style={S.ctrlRow}>
+            <span style={S.ctrlLabel}>Flag sensitivity</span>
+            {[[1,"Aggressive"],[2,"Balanced"],[3,"Strict"]].map(([v,lbl])=>(
+              <button key={v}
+                style={{...S.segBtn,...(minWeight===v?S.segBtnActive:{})}}
+                onClick={()=>setMinWeight(v)}>{lbl}</button>
+            ))}
+            <button style={S.btnGhost} onClick={reset}>Reset swaps</button>
+          </div>
+          <section style={S.card}>
+            <div style={S.legend}>
+              <Legend cls="w3" txt="very AI-like"/>
+              <Legend cls="w2" txt="AI-leaning"/>
+              {minWeight===1&&<Legend cls="w1" txt="soft flag"/>}
+              <Legend cls="swapped" txt="swapped"/>
+            </div>
+            <p style={S.hint}>
+              Every word is clickable &mdash; coloured words are AI-flagged,
+              dotted-underline words are clean but still swappable.
+              Click any word for synonyms; the score gauge updates as you go.
+            </p>
+            <div style={S.canvas}>{renderHumanizerCanvas(false)}</div>
+            <div style={S.detFoot}>
+              <Mini n={stats.words} label="words" tone="neutral"/>
+              <Mini n={stats.flagged} label="flagged" tone="warn"/>
+              <Mini n={stats.swapped} label="swapped" tone="good"/>
+            </div>
+          </section>
+        </>
+      )}
+
+      {/* OUTPUT */}
+      <section style={{...S.card,...S.outputCard}}>
+        <div style={S.outHead}>
+          <label style={S.label}>Working text</label>
+          <button style={S.btnCopy} onClick={copyOutput}>Copy</button>
+        </div>
+        <p style={S.output}>{workingText}</p>
+      </section>
+
+      <footer style={S.footer}>
+        This is a heuristic tool, not a forensic detector. It estimates
+        AI-likelihood from writing patterns &mdash; sentence rhythm, structure,
+        predictability and vocabulary &mdash; so treat the percentage as a
+        rough guide, never proof. Human writing, especially formal clinical
+        or academic prose, can score high. In medical writing some flagged
+        words (&ldquo;significant&rdquo;, &ldquo;vital&rdquo;) are often correct; reread before
+        swapping.
+      </footer>
+    </div>
+  );
+}
+
+/* ================================================================
+   SUB-COMPONENTS
+   ================================================================ */
+
+/* circular score gauge */
+function Gauge({score}){
+  const r=52,c=2*Math.PI*r;
+  const off=c*(1-score/100);
+  const color=score>=60?"#dc2626":score>=30?"#d97706":"#16a34a";
+  return (
+    <div style={S.gaugeWrap}>
+      <svg width="140" height="140" viewBox="0 0 140 140">
+        <circle cx="70" cy="70" r={r} fill="none" stroke="#e2e8f0"
+          strokeWidth="13"/>
+        <circle cx="70" cy="70" r={r} fill="none" stroke={color}
+          strokeWidth="13" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={off}
+          transform="rotate(-90 70 70)"
+          style={{transition:"stroke-dashoffset .5s ease, stroke .3s ease"}}/>
+        <text x="70" y="66" textAnchor="middle"
+          style={{fontSize:30,fontWeight:800,fill:color,
+            fontFamily:"ui-sans-serif, system-ui, sans-serif"}}>
+          {score}%
+        </text>
+        <text x="70" y="88" textAnchor="middle"
+          style={{fontSize:11,fill:"#94a3b8",letterSpacing:"0.08em",
+            fontFamily:"ui-sans-serif, system-ui, sans-serif"}}>
+          AI SCORE
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+/* explainer card under a clicked sentence */
+function SentenceCard({s,onClose,onFix}){
+  return (
+    <div className="pop" style={S.sentCard}>
+      <div style={S.scHead}>
+        <span className={"sv-tag "+s.verdict.cls}>{s.verdict.label}</span>
+        <span style={S.scScore}>{s.score}% AI</span>
+        <button style={S.popX} onClick={onClose}>&times;</button>
+      </div>
+      {s.signals.length>0?(
+        <ul style={S.scList}>
+          {s.signals.map((sig,i)=>(
+            <li key={i} style={S.scItem}>
+              <span style={S.scPts}>+{sig.pts}</span>
+              <span>
+                <strong>{sig.label}.</strong> {sig.detail}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ):(
+        <p style={S.scNone}>
+          No strong AI signals &mdash; this sentence reads natural.
+        </p>
+      )}
+      {s.verdict.key!=="human"&&(
+        <button style={S.scFix} onClick={onFix}>
+          Open Humanizer to rework flagged words &rarr;
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* Built-in OFFLINE thesaurus. This is the reliable layer: it works
+   with no network at all. Online APIs are only a bonus on top.
+   Covers common English plus a medical / clinical section so terms
+   like "hypertension" always resolve. Keys are lowercase. */
+const MINI_THESAURUS={
+  /* --- everyday adjectives --- */
+  good:["fine","solid","strong","decent","sound"],
+  bad:["poor","weak","subpar","faulty"],
+  big:["large","sizeable","major","substantial"],
+  small:["minor","slight","modest","limited"],
+  large:["big","sizeable","extensive","broad"],
+  high:["raised","elevated","steep","increased"],
+  low:["reduced","slight","modest","decreased"],
+  new:["recent","fresh","modern","novel"],
+  old:["former","prior","earlier","aged"],
+  important:["key","central","major","critical"],
+  difficult:["hard","tough","demanding","tricky"],
+  easy:["simple","straightforward","clear"],
+  fast:["quick","rapid","swift","speedy"],
+  slow:["gradual","unhurried","sluggish"],
+  common:["frequent","widespread","usual","typical"],
+  rare:["uncommon","scarce","infrequent","unusual"],
+  clear:["obvious","evident","plain","apparent"],
+  strong:["powerful","robust","intense","marked"],
+  weak:["faint","mild","slight","limited"],
+  long:["extended","lengthy","prolonged"],
+  short:["brief","concise","limited"],
+  many:["numerous","several","various","countless"],
+  few:["several","limited","sparse"],
+  early:["initial","first","preliminary"],
+  late:["delayed","subsequent","later"],
+  main:["chief","primary","principal","key"],
+  whole:["entire","complete","full","total"],
+  /* --- everyday verbs --- */
+  show:["reveal","display","indicate","present"],
+  use:["apply","employ","draw on","utilize"],
+  help:["aid","support","assist","benefit"],
+  make:["build","create","produce","form"],
+  get:["obtain","gain","acquire","reach"],
+  find:["spot","locate","identify","discover"],
+  start:["begin","launch","initiate","open"],
+  begin:["start","commence","initiate"],
+  end:["finish","close","conclude","stop"],
+  change:["alter","shift","adjust","modify"],
+  increase:["raise","grow","boost","rise"],
+  decrease:["lower","reduce","cut","fall"],
+  reduce:["lower","cut","ease","lessen"],
+  improve:["boost","enhance","better","lift"],
+  cause:["trigger","produce","lead to","induce"],
+  affect:["influence","impact","alter"],
+  give:["provide","offer","supply","grant"],
+  need:["require","call for","demand"],
+  keep:["retain","maintain","hold","preserve"],
+  allow:["permit","enable","let"],
+  prevent:["stop","avert","block","avoid"],
+  develop:["build","form","create","grow"],
+  remove:["take out","eliminate","clear"],
+  include:["contain","cover","comprise"],
+  consider:["weigh","think about","review"],
+  suggest:["indicate","imply","propose","point to"],
+  occur:["happen","take place","arise"],
+  appear:["seem","look","emerge"],
+  follow:["come after","track","trace"],
+  /* --- everyday nouns --- */
+  way:["method","approach","manner","route"],
+  part:["section","portion","piece","segment"],
+  area:["region","zone","field","sector"],
+  group:["set","cluster","batch","category"],
+  problem:["issue","difficulty","trouble","concern"],
+  result:["finding","outcome","effect","figure"],
+  number:["figure","count","total","amount"],
+  amount:["quantity","level","volume"],
+  time:["period","span","duration","interval"],
+  place:["spot","location","site","setting"],
+  point:["detail","aspect","feature","item"],
+  level:["degree","extent","amount","rate"],
+  rate:["pace","level","frequency","speed"],
+  goal:["aim","target","objective","purpose"],
+  idea:["concept","notion","thought","point"],
+  fact:["detail","point","reality","truth"],
+  study:["trial","analysis","research","review"],
+  research:["study","investigation","analysis"],
+  analysis:["review","assessment","examination"],
+  data:["figures","findings","information"],
+  evidence:["proof","support","findings"],
+  method:["approach","technique","way","process"],
+  /* --- medical / clinical --- */
+  hypertension:["high blood pressure","raised blood pressure"],
+  hypotension:["low blood pressure"],
+  dyslipidemia:["abnormal blood lipids","lipid disorder","high cholesterol"],
+  hyperlipidemia:["high blood lipids","raised cholesterol"],
+  cholesterol:["blood lipid","lipid"],
+  diabetes:["high blood sugar","diabetes mellitus"],
+  hyperglycemia:["high blood sugar","raised glucose"],
+  hypoglycemia:["low blood sugar","low glucose"],
+  patient:["case","person","individual"],
+  disease:["illness","condition","disorder","ailment"],
+  illness:["sickness","disease","condition"],
+  condition:["disorder","problem","state"],
+  disorder:["condition","problem","disease"],
+  symptom:["sign","indication","feature"],
+  diagnosis:["assessment","identification","finding"],
+  treatment:["therapy","care","management","regimen"],
+  therapy:["treatment","care","intervention"],
+  medication:["drug","medicine","agent"],
+  drug:["medication","medicine","agent"],
+  dose:["dosage","amount","quantity"],
+  dosage:["dose","amount"],
+  adverse:["harmful","unwanted","negative"],
+  efficacy:["effectiveness","benefit"],
+  outcome:["result","finding","endpoint"],
+  mortality:["death rate","death"],
+  morbidity:["illness","disease burden"],
+  prevalence:["frequency","commonness","rate"],
+  incidence:["rate","occurrence","frequency"],
+  risk:["danger","hazard","chance","likelihood"],
+  prognosis:["outlook","forecast","expected course"],
+  chronic:["long-term","persistent","ongoing"],
+  acute:["sudden","severe","short-term"],
+  severe:["serious","marked","intense","extreme"],
+  mild:["slight","minor","gentle"],
+  moderate:["medium","intermediate","fair"],
+  benign:["harmless","non-cancerous","mild"],
+  malignant:["cancerous","aggressive"],
+  preventable:["avoidable","stoppable"],
+  cardiovascular:["heart and vessel","circulatory"],
+  renal:["kidney","nephritic"],
+  hepatic:["liver"],
+  cardiac:["heart"],
+  pulmonary:["lung","respiratory"],
+  clinical:["medical","bedside"],
+  /* --- transitions / connectors --- */
+  and:["plus","as well as","along with"],
+  but:["yet","however","though"],
+  so:["therefore","thus","as a result"],
+  also:["too","as well","in addition"],
+  because:["since","as","given that"],
+  although:["though","even though","while"],
+  however:["but","yet","though"],
+  therefore:["so","thus","hence"],
+  thus:["so","therefore","hence"],
+  while:["whereas","as","though"],
+};
+
+/* module-level cache: each word is fetched from the API only once.
+   key = lowercase clean word, value = array of alternatives. */
+const SYN_CACHE={};
+
+/* Fetch alternatives for ANY word. Runs a fallback chain so that
+   even words with no true synonyms still return something:
+     1. rel_syn  — strict synonyms
+     2. ml       — "means like" (looser meaning matches)
+     3. rel_trg  — words triggered by / associated with the word
+   Results from all reached strategies are merged and de-duplicated. */
+/* Look a word up in the offline thesaurus, also trying simple
+   de-inflected forms so "risks"->"risk", "increased"->"increase",
+   "studies"->"study", "running" stays as-is if no base found. */
+function thesaurusLookup(word){
+  const w=word.toLowerCase().replace(/[^a-z'-]/g,"");
+  if(!w)return[];
+  if(MINI_THESAURUS[w])return MINI_THESAURUS[w];
+  const tries=[];
+  if(w.endsWith("ies"))tries.push(w.slice(0,-3)+"y");
+  if(w.endsWith("es"))tries.push(w.slice(0,-2));
+  if(w.endsWith("s"))tries.push(w.slice(0,-1));
+  if(w.endsWith("ed"))tries.push(w.slice(0,-2),w.slice(0,-1));
+  if(w.endsWith("ing")){
+    tries.push(w.slice(0,-3),w.slice(0,-3)+"e");
+  }
+  if(w.endsWith("ly"))tries.push(w.slice(0,-2));
+  for(const t of tries){
+    if(MINI_THESAURUS[t])return MINI_THESAURUS[t];
+  }
+  return[];
+}
+
+async function fetchSynonyms(word){
+  const w=word.toLowerCase().replace(/[^a-z'-]/g,"");
+  if(!w)return[];
+  if(SYN_CACHE[w])return SYN_CACHE[w];           // cache hit
+
+  const strategies=[
+    "rel_syn="+encodeURIComponent(w)+"&max=12",
+    "ml="+encodeURIComponent(w)+"&max=14",
+    "rel_trg="+encodeURIComponent(w)+"&max=12",
+  ];
+  const seen=new Set([w]);
+  const out=[];
+
+  /* Datamuse sends no CORS header, so a direct browser fetch is
+     often blocked. Try direct first, then a public CORS proxy. */
+  async function tryFetch(qs){
+    const direct="https://api.datamuse.com/words?"+qs;
+    try{
+      const r=await fetch(direct);
+      if(r.ok)return await r.json();
+    }catch(e){/* fall through to proxy */}
+    try{
+      const proxied="https://corsproxy.io/?url="+encodeURIComponent(direct);
+      const r2=await fetch(proxied);
+      if(r2.ok)return await r2.json();
+    }catch(e){/* give up on this strategy */}
+    return null;
+  }
+
+  for(const qs of strategies){
+    const data=await tryFetch(qs);
+    if(Array.isArray(data)){
+      for(const item of data){
+        const cand=(item.word||"").toLowerCase();
+        if(!cand||seen.has(cand))continue;
+        if(cand.split(" ").length>3)continue;   // skip long phrases
+        if(/[^a-z' -]/.test(cand))continue;     // skip odd tokens
+        seen.add(cand);
+        out.push(item.word);
+      }
+    }
+    if(out.length>=10)break;
+  }
+
+  const result=out.slice(0,12);
+  SYN_CACHE[w]=result;                            // store in cache
+  return result;
+}
+
+/* cache for dictionary definitions, same idea as SYN_CACHE */
+const DEF_CACHE={};
+
+/* Fetch the dictionary definition from the Free Dictionary API.
+   This API allows browser (CORS) access, so the online check-up
+   genuinely works. Returns an object with a clear status:
+     {status:"ok", senses:[...], dictSyn:[...]}  — found online
+     {status:"notfound"}                          — online, no entry
+     {status:"offline"}                           — network failed
+   so the UI can tell the user exactly what happened. */
+async function fetchDefinition(word){
+  const w=word.toLowerCase().replace(/[^a-z'-]/g,"");
+  if(!w)return{status:"notfound"};
+  if(DEF_CACHE[w]!==undefined)return DEF_CACHE[w];   // cache hit
+
+  let res;
+  try{
+    const r=await fetch(
+      "https://api.dictionaryapi.dev/api/v2/entries/en/"+encodeURIComponent(w),
+      {signal:AbortSignal.timeout?AbortSignal.timeout(8000):undefined});
+    if(r.status===404){
+      res={status:"notfound"};
+    }else if(!r.ok){
+      res={status:"offline"};
+    }else{
+      const data=await r.json();
+      if(!Array.isArray(data)||!data[0]||!data[0].meanings){
+        res={status:"notfound"};
+      }else{
+        const senses=[];
+        const dictSyn=new Set();
+        for(const meaning of data[0].meanings){
+          const pos=meaning.partOfSpeech||"";
+          (meaning.synonyms||[]).forEach(s=>dictSyn.add(s));
+          for(const d of(meaning.definitions||[])){
+            if(d.definition)senses.push({pos,definition:d.definition});
+            (d.synonyms||[]).forEach(s=>dictSyn.add(s));
+            if(senses.length>=3)break;
+          }
+          if(senses.length>=3)break;
+        }
+        res={status:"ok",senses,dictSyn:Array.from(dictSyn).slice(0,8)};
+      }
+    }
+  }catch(e){
+    /* network blocked, timed out, or DNS failure */
+    res={status:"offline"};
+  }
+  /* only cache definitive answers; let "offline" be retried later */
+  if(res.status!=="offline")DEF_CACHE[w]=res;
+  return res;
+}
+
+function Popover({label,weight,alts,swapped,onPick,onUndo,onClose}){
+  const [custom,setCustom]=useState("");
+  const [fetched,setFetched]=useState(null); // synonyms; null = not loaded
+  const [loading,setLoading]=useState(false);
+  const [defn,setDefn]=useState(undefined); // undefined=not loaded, null=none
+  const [defLoading,setDefLoading]=useState(false);
+  const flagged=weight>0;
+  const tag=flagged?(WEIGHT_LABEL[weight]||"flag"):"any word";
+  const tagColor=weight===3?"#7f1d1d":weight===2?"#b91c1c"
+    :weight===1?"#a16207":"#475569";
+
+  const presetAlts=(alts||[]).filter(Boolean);
+  const cleanWord=label.toLowerCase().replace(/[^a-z'-]/g,"");
+  const miniAlts=thesaurusLookup(label);
+
+  const loadSynonyms=async()=>{
+    setLoading(true);
+    const syn=await fetchSynonyms(label);
+    setFetched(syn);
+    setLoading(false);
+  };
+  const loadDefinition=async()=>{
+    setDefLoading(true);
+    const d=await fetchDefinition(label);
+    setDefn(d);
+    setDefLoading(false);
+  };
+
+  /* auto-load synonyms AND the dictionary definition the moment the
+     popover opens. cached words show instantly with no spinner. */
+  React.useEffect(()=>{
+    if(SYN_CACHE[cleanWord])setFetched(SYN_CACHE[cleanWord]);
+    else loadSynonyms();
+    if(DEF_CACHE[cleanWord]!==undefined)setDefn(DEF_CACHE[cleanWord]);
+    else loadDefinition();
+  // eslint-disable-next-line
+  },[]);
+
+  /* dictionary-provided synonyms get merged into the live list */
+  const dictSyn=(defn&&defn.dictSyn)||[];
+  const liveAlts=(fetched||[]).concat(dictSyn).filter(
+    (a,idx,arr)=>a&&!presetAlts.includes(a)&&!miniAlts.includes(a)
+      &&arr.indexOf(a)===idx);
+  const totalShown=presetAlts.length+miniAlts.length+liveAlts.length;
+
+  return (
+    <div className="pop" style={S.pop}>
+      <div style={S.popHead}>
+        <span style={S.popWord}>&ldquo;{label}&rdquo;</span>
+        <span style={{...S.popTag,background:tagColor}}>{tag}</span>
+        <button style={S.popX} onClick={onClose}>&times;</button>
+      </div>
+
+      {/* online dictionary check-up */}
+      {defLoading&&(
+        <div style={S.defBox}>
+          <span style={S.defStatus}>
+            <span style={S.dotChecking}/> Checking online dictionary&hellip;
+          </span>
+        </div>
+      )}
+      {!defLoading&&defn&&defn.status==="ok"&&(
+        <div style={S.defBox}>
+          <div style={S.defStatusOk}>
+            <span style={S.dotOk}/> Checked online &mdash; Free Dictionary
+          </div>
+          {defn.senses.map((sn,k)=>(
+            <div key={k} style={S.defSense}>
+              {sn.pos&&<span style={S.defPos}>{sn.pos}</span>}
+              <span style={S.defText}>{sn.definition}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {!defLoading&&defn&&defn.status==="notfound"&&(
+        <div style={S.defBox}>
+          <div style={S.defStatusOk}>
+            <span style={S.dotOk}/> Checked online
+          </div>
+          <span style={S.popNone}>
+            No dictionary entry &mdash; this may be a name, abbreviation,
+            or specialist term.
+          </span>
+        </div>
+      )}
+      {!defLoading&&defn&&defn.status==="offline"&&(
+        <div style={S.defBoxWarn}>
+          <div style={S.defStatusWarn}>
+            <span style={S.dotWarn}/> Online check unavailable
+          </div>
+          <span style={S.popNone}>
+            Couldn&rsquo;t reach the dictionary &mdash; showing built-in
+            suggestions below. <button style={S.retryBtn}
+              onClick={loadDefinition}>Retry</button>
+          </span>
+        </div>
+      )}
+
+      {presetAlts.length>0&&(
+        <>
+          <div style={S.popSection}>humanizing swaps</div>
+          <div style={S.popAlts}>
+            {presetAlts.map(a=>(
+              <button key={a} style={S.altBtn} onClick={()=>onPick(a)}>{a}</button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {miniAlts.length>0&&(
+        <>
+          <div style={S.popSection}>synonyms</div>
+          <div style={S.popAlts}>
+            {miniAlts.map(a=>(
+              <button key={a} style={S.altBtn} onClick={()=>onPick(a)}>{a}</button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* live-fetched synonyms — loaded for every word */}
+      <div style={S.popSection}>
+        {presetAlts.length+miniAlts.length>0?"more synonyms":"synonyms"}
+        {loading&&<span style={S.popLoad}> loading&hellip;</span>}
+      </div>
+      {liveAlts.length>0&&(
+        <div style={S.popAlts}>
+          {liveAlts.map(a=>(
+            <button key={a} style={S.altBtn} onClick={()=>onPick(a)}>{a}</button>
+          ))}
+        </div>
+      )}
+      {!loading&&fetched!==null&&liveAlts.length===0&&(
+        <span style={S.popNone}>
+          {totalShown>0
+            ?"No further synonyms found."
+            :"No synonyms found \u2014 type your own below."}
+        </span>
+      )}
+      {loading&&liveAlts.length===0&&(
+        <span style={S.popNone}>Searching the thesaurus&hellip;</span>
+      )}
+
+      <div style={S.popCustom}>
+        <input style={S.popInput} value={custom}
+          placeholder="or type your own..."
+          onChange={e=>setCustom(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter"&&custom.trim())onPick(custom.trim());}}/>
+        <button style={S.popGo}
+          onClick={()=>custom.trim()&&onPick(custom.trim())}>Use</button>
+      </div>
+      {swapped&&(
+        <button style={S.popUndo} onClick={onUndo}>&#8634; Revert to original</button>
+      )}
+    </div>
+  );
+}
+
+function Pill({n,label,cls}){
+  return <span className={"pill "+cls}>{n} {label}</span>;
+}
+function Mini({n,label,tone}){
+  const colors={neutral:"#334155",warn:"#c2410c",good:"#15803d",
+    ai:"#b91c1c",refined:"#b45309",human:"#15803d"};
+  return (
+    <div style={S.mini}>
+      <span style={{...S.miniN,color:colors[tone]}}>{n}</span>
+      <span style={S.miniL}>{label}</span>
+    </div>
+  );
+}
+function Legend({cls,txt}){
+  return (
+    <span style={S.legItem}>
+      <span className={(cls.startsWith("sv")?"sent ":"tok ")+cls}
+        style={S.legSwatch}>Aa</span>
+      {txt}
+    </span>
+  );
+}
+
+/* ================================================================
+   STYLES
+   ================================================================ */
+const CSS=`
+  .tok{cursor:pointer;border-radius:4px;padding:1px 3px;
+       transition:transform .08s ease,filter .12s ease;}
+  .tok:hover{transform:translateY(-1px);filter:brightness(1.08);}
+  .tok.w3{background:#fecaca;color:#7f1d1d;box-shadow:inset 0 -2px 0 #dc2626;}
+  .tok.w2{background:#fee2e2;color:#991b1b;box-shadow:inset 0 -2px 0 #f87171;}
+  .tok.w1{background:#fef9c3;color:#854d0e;box-shadow:inset 0 -2px 0 #eab308;}
+  .tok.plain{background:transparent;color:inherit;
+             border-bottom:1px dotted #cbd5e1;}
+  .tok.plain:hover{background:#f1f5f9;border-bottom-color:#94a3b8;}
+  .tok.swapped{background:#dcfce7;color:#166534;box-shadow:inset 0 -2px 0 #22c55e;}
+  .sent{cursor:pointer;border-radius:5px;padding:2px 4px;
+        transition:filter .12s ease,box-shadow .12s ease;
+        box-decoration-break:clone;-webkit-box-decoration-break:clone;}
+  .sent:hover{filter:brightness(.97);}
+  .sent.sv-ai{background:#fee2e2;box-shadow:inset 0 -2px 0 #ef4444;}
+  .sent.sv-refined{background:#fef3c7;box-shadow:inset 0 -2px 0 #f59e0b;}
+  .sent.sv-human{background:transparent;}
+  .sent.sent-open{outline:2px solid #0f172a;outline-offset:1px;}
+  /* sentence-tint background behind clickable words */
+  .sentbg{border-radius:5px;padding:1px 0;
+          box-decoration-break:clone;-webkit-box-decoration-break:clone;}
+  .sentbg.sv-ai{background:#fde8e8;box-shadow:inset 0 -2px 0 #f87171;}
+  .sentbg.sv-refined{background:#fef5da;box-shadow:inset 0 -2px 0 #fbbf24;}
+  .sentbg.sv-human{background:transparent;}
+  /* per-sentence explainer rows under the text */
+  .sentRow{display:flex;align-items:center;gap:8px;width:100%;
+           text-align:left;background:#fff;border:1px solid #e2e8f0;
+           border-radius:8px;padding:8px 10px;cursor:pointer;
+           font-family:ui-sans-serif,system-ui,sans-serif;}
+  .sentRow:hover{background:#f8fafc;}
+  .sentRow.sv-ai{border-left:3px solid #ef4444;}
+  .sentRow.sv-refined{border-left:3px solid #f59e0b;}
+  .sentRow.sv-human{border-left:3px solid #22c55e;}
+  .pill{font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;
+        font-family:ui-sans-serif,system-ui,sans-serif;}
+  .pill.sv-ai{background:#fee2e2;color:#991b1b;}
+  .pill.sv-refined{background:#fef3c7;color:#92400e;}
+  .pill.sv-human{background:#dcfce7;color:#166534;}
+  .sv-tag{font-size:10px;font-weight:700;padding:3px 8px;border-radius:5px;
+          text-transform:uppercase;letter-spacing:.04em;
+          font-family:ui-sans-serif,system-ui,sans-serif;}
+  .sv-tag.sv-ai{background:#dc2626;color:#fff;}
+  .sv-tag.sv-refined{background:#d97706;color:#fff;}
+  .sv-tag.sv-human{background:#16a34a;color:#fff;}
+  .bigVerdict{font-size:21px;font-weight:800;letter-spacing:-.01em;
+              font-family:ui-sans-serif,system-ui,sans-serif;}
+  .bigVerdict.big-ai{color:#dc2626;}
+  .bigVerdict.big-refined{color:#d97706;}
+  .bigVerdict.big-human{color:#16a34a;}
+  .pop{animation:pop .12s ease-out;}
+  @keyframes pop{from{opacity:0;transform:translateY(4px) scale(.97);}}
+`;
+
+const S={
+  page:{fontFamily:"'Iowan Old Style', Georgia, 'Times New Roman', serif",
+    maxWidth:780,margin:"0 auto",padding:"28px 20px 60px",color:"#1e293b"},
+  header:{marginBottom:20},
+  title:{fontSize:32,margin:0,letterSpacing:"-0.02em",fontWeight:700},
+  sub:{margin:"6px 0 0",color:"#64748b",fontSize:14.5,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  card:{background:"#fff",border:"1px solid #e2e8f0",borderRadius:14,
+    padding:18,marginBottom:16,boxShadow:"0 1px 2px rgba(15,23,42,0.04)"},
+  scoreCard:{display:"flex",alignItems:"center",gap:22,flexWrap:"wrap"},
+  scoreSide:{flex:1,minWidth:230},
+  gaugeWrap:{flexShrink:0},
+  scoreText:{margin:"6px 0 10px",fontSize:14,color:"#475569",lineHeight:1.55,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  verdictPills:{display:"flex",gap:8,flexWrap:"wrap"},
+  outputCard:{background:"#f8fafc"},
+  label:{display:"block",fontSize:12,fontWeight:700,letterSpacing:"0.06em",
+    textTransform:"uppercase",color:"#94a3b8",marginBottom:8,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  textarea:{width:"100%",border:"1px solid #cbd5e1",borderRadius:8,padding:12,
+    fontSize:16,lineHeight:1.6,fontFamily:"inherit",resize:"vertical",
+    boxSizing:"border-box",outline:"none"},
+  tabRow:{display:"flex",gap:4,marginBottom:16,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  tab:{flex:1,background:"#f1f5f9",border:"1px solid #e2e8f0",
+    borderRadius:9,padding:"9px 0",fontSize:14,cursor:"pointer",
+    color:"#475569",fontWeight:600},
+  tabActive:{background:"#0f172a",color:"#fff",borderColor:"#0f172a"},
+  legend:{display:"flex",gap:16,flexWrap:"wrap",marginBottom:10,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  legItem:{display:"flex",alignItems:"center",gap:6,fontSize:12,
+    color:"#64748b"},
+  legSwatch:{fontSize:11,cursor:"default"},
+  hint:{fontSize:13,color:"#64748b",margin:"0 0 12px",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  sentCanvas:{fontSize:18,lineHeight:2.3,color:"#0f172a"},
+  sentList:{display:"flex",flexDirection:"column",gap:6,
+    marginTop:16},
+  sentRowScore:{fontSize:11.5,fontWeight:700,color:"#475569",
+    flexShrink:0},
+  sentRowText:{fontSize:12.5,color:"#64748b",flex:1,
+    overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"},
+  sentRowChev:{fontSize:15,fontWeight:700,color:"#94a3b8",
+    flexShrink:0,width:14,textAlign:"center"},
+  sentExplain:{padding:"10px 12px 4px 13px"},
+  canvas:{fontSize:18,lineHeight:2.2,color:"#0f172a"},
+  detFoot:{display:"flex",gap:22,flexWrap:"wrap",marginTop:14,
+    paddingTop:12,borderTop:"1px solid #f1f5f9",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  mini:{display:"flex",alignItems:"baseline",gap:6},
+  miniN:{fontSize:20,fontWeight:800},
+  miniL:{fontSize:11.5,color:"#64748b"},
+  ctrlRow:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
+    margin:"0 4px 12px",fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  ctrlLabel:{fontSize:12,fontWeight:700,color:"#64748b",
+    textTransform:"uppercase",letterSpacing:"0.05em",marginRight:4},
+  segBtn:{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:7,
+    padding:"5px 13px",fontSize:13,cursor:"pointer",color:"#475569"},
+  segBtnActive:{background:"#0f172a",color:"#fff",borderColor:"#0f172a",
+    fontWeight:600},
+  btnGhost:{background:"none",border:"1px solid #cbd5e1",borderRadius:7,
+    padding:"5px 12px",fontSize:13,cursor:"pointer",color:"#475569",
+    marginLeft:"auto"},
+  outHead:{display:"flex",justifyContent:"space-between",alignItems:"center"},
+  output:{fontSize:17,lineHeight:1.75,margin:"4px 0 0",color:"#0f172a"},
+  btnCopy:{background:"#0f172a",color:"#fff",border:"none",borderRadius:7,
+    padding:"6px 16px",fontSize:13,cursor:"pointer",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  footer:{marginTop:14,fontSize:12.5,color:"#94a3b8",lineHeight:1.6,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  /* sentence explainer card */
+  sentCard:{position:"absolute",top:"125%",left:0,zIndex:40,width:320,
+    background:"#fff",border:"1px solid #e2e8f0",borderRadius:11,
+    boxShadow:"0 12px 34px rgba(15,23,42,0.20)",padding:14,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  scHead:{display:"flex",alignItems:"center",gap:8,marginBottom:10},
+  scScore:{fontSize:13,fontWeight:700,color:"#475569"},
+  scList:{listStyle:"none",margin:0,padding:0,display:"flex",
+    flexDirection:"column",gap:8},
+  scItem:{display:"flex",gap:8,fontSize:12.5,color:"#334155",
+    lineHeight:1.45,alignItems:"flex-start"},
+  scPts:{flexShrink:0,fontSize:11,fontWeight:700,color:"#b91c1c",
+    background:"#fee2e2",borderRadius:5,padding:"1px 6px"},
+  scNone:{fontSize:12.5,color:"#16a34a",margin:0},
+  scFix:{marginTop:12,width:"100%",background:"#0f172a",color:"#fff",
+    border:"none",borderRadius:7,padding:"7px",fontSize:12.5,
+    cursor:"pointer",fontWeight:600},
+  /* word popover */
+  pop:{position:"absolute",top:"135%",left:0,zIndex:30,width:250,
+    background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,
+    boxShadow:"0 10px 30px rgba(15,23,42,0.18)",padding:12,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  popHead:{display:"flex",alignItems:"center",gap:6,marginBottom:10},
+  popWord:{fontSize:14,fontWeight:700,color:"#0f172a"},
+  popTag:{fontSize:9,fontWeight:700,color:"#fff",padding:"2px 6px",
+    borderRadius:5,textTransform:"uppercase",letterSpacing:"0.04em"},
+  popX:{marginLeft:"auto",background:"none",border:"none",fontSize:18,
+    cursor:"pointer",color:"#94a3b8",lineHeight:1},
+  popAlts:{display:"flex",flexWrap:"wrap",gap:6},
+  defBox:{background:"#f8fafc",border:"1px solid #e2e8f0",
+    borderRadius:8,padding:"8px 10px",margin:"10px 0 2px"},
+  defBoxWarn:{background:"#fffbeb",border:"1px solid #fde68a",
+    borderRadius:8,padding:"8px 10px",margin:"10px 0 2px"},
+  defSense:{marginBottom:5},
+  defPos:{display:"inline-block",fontSize:10,fontWeight:700,
+    fontStyle:"italic",color:"#64748b",marginRight:6},
+  defText:{fontSize:12.5,color:"#334155",lineHeight:1.5},
+  defStatus:{fontSize:11,color:"#64748b",display:"flex",
+    alignItems:"center",gap:6},
+  defStatusOk:{fontSize:10,fontWeight:700,color:"#15803d",
+    display:"flex",alignItems:"center",gap:5,marginBottom:5,
+    textTransform:"uppercase",letterSpacing:"0.04em"},
+  defStatusWarn:{fontSize:10,fontWeight:700,color:"#b45309",
+    display:"flex",alignItems:"center",gap:5,marginBottom:5,
+    textTransform:"uppercase",letterSpacing:"0.04em"},
+  dotOk:{width:7,height:7,borderRadius:"50%",background:"#22c55e",
+    display:"inline-block"},
+  dotWarn:{width:7,height:7,borderRadius:"50%",background:"#f59e0b",
+    display:"inline-block"},
+  dotChecking:{width:7,height:7,borderRadius:"50%",background:"#94a3b8",
+    display:"inline-block"},
+  retryBtn:{background:"#fef3c7",border:"1px solid #fcd34d",
+    color:"#92400e",borderRadius:5,padding:"1px 8px",fontSize:11,
+    cursor:"pointer",marginLeft:4},
+  popSection:{fontSize:10,fontWeight:700,color:"#94a3b8",
+    textTransform:"uppercase",letterSpacing:"0.06em",
+    margin:"10px 0 6px"},
+  popLoad:{fontWeight:500,color:"#64748b",textTransform:"none",
+    letterSpacing:0},
+  popMore:{marginTop:10,width:"100%",background:"#f1f5f9",
+    border:"1px dashed #cbd5e1",color:"#475569",borderRadius:6,
+    padding:"6px",fontSize:12,cursor:"pointer"},
+  popNone:{fontSize:12,color:"#94a3b8"},
+  altBtn:{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:6,
+    padding:"5px 10px",fontSize:13,cursor:"pointer",color:"#0f172a"},
+  popCustom:{display:"flex",gap:6,marginTop:10},
+  popInput:{flex:1,border:"1px solid #cbd5e1",borderRadius:6,
+    padding:"5px 8px",fontSize:13,outline:"none",minWidth:0},
+  popGo:{background:"#0f172a",color:"#fff",border:"none",borderRadius:6,
+    padding:"5px 12px",fontSize:13,cursor:"pointer"},
+  popUndo:{marginTop:10,width:"100%",background:"#fef2f2",
+    border:"1px solid #fecaca",color:"#b91c1c",borderRadius:6,
+    padding:"6px",fontSize:12.5,cursor:"pointer"},
+};
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<Humanizer />);
+</script>
+</body>
+</html>

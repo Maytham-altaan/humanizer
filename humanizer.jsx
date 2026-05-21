@@ -149,6 +149,33 @@ const BASE = {
   individuals:{w:1,alt:["people"]},
   assist:{w:1,alt:["help"]},
   require:{w:1,alt:["need"]},
+  /* clinical / formal AI tells — hedging adverbs and stative verbs that
+     AI overuses in technical or academic prose. Soft weights so a single
+     occurrence in a longer sentence doesn't over-fire, but density does. */
+  frequently:{w:1,alt:["often"]},
+  commonly:{w:1,alt:["often","usually"]},
+  typically:{w:1,alt:["usually","often"]},
+  routinely:{w:1,alt:["regularly","often"]},
+  predominantly:{w:1,alt:["mostly","mainly"]},
+  primarily:{w:1,alt:["mostly","mainly"]},
+  generally:{w:1,alt:["usually","mostly"]},
+  similarly:{w:1,alt:["likewise","also","in the same way"]},
+  opportunistically:{w:2,alt:["by chance","as the chance arises"]},
+  incidentally:{w:1,alt:["by chance","along the way"]},
+  identified:{w:1,alt:["found","spotted","detected"]},
+  established:{w:1,alt:["set","known","fixed"]},
+  observed:{w:1,alt:["seen","noticed"]},
+  characterized:{w:1,alt:["marked","defined"]},
+  documented:{w:1,alt:["recorded","noted"]},
+  associated:{w:1,alt:["linked","tied","connected"]},
+  underlying:{w:1,alt:["main","basic"]},
+  multiple:{w:1,alt:["several","many"]},
+  utilize:{w:2,alt:["use"]},
+  utilized:{w:2,alt:["used"]},
+  facilitate:{w:2,alt:["help","ease"]},
+  facilitates:{w:2,alt:["helps","eases"]},
+  encompass:{w:2,alt:["cover","include"]},
+  encompasses:{w:2,alt:["covers","includes"]},
 };
 
 const PHRASES = {
@@ -340,10 +367,10 @@ function scoreSentence(sentence,allLengths,idx){
     const variance=allLengths.reduce((a,b)=>a+(b-mean)*(b-mean),0)/allLengths.length;
     const sd=Math.sqrt(variance);
     /* low burstiness across the doc: every sentence close to the mean */
-    if(sd<6&&allLengths.length>=4){
+    if(sd<Math.max(6,mean*0.32)){
       pts+=10;
       signals.push({label:"Uniform rhythm",
-        detail:"all sentences are a similar length \u2014 low \u201cburstiness\u201d",
+        detail:"sentences are similar in length \u2014 low \u201cburstiness\u201d",
         pts:10});
     }
     /* this sentence very close to mean while doc is uniform */
@@ -354,16 +381,46 @@ function scoreSentence(sentence,allLengths,idx){
     }
   }
 
-  /* 5. parallel "X, Y, and Z" triadic list — an AI tell */
+  /* 5. multi-item enumeration — "A, B, and C" or "A, B, C or D".
+        Scaled by item count: 3+ items is a strong AI tell. */
   const commaCount=(sentence.match(/,/g)||[]).length;
-  if(commaCount>=2&&/\band\b/.test(low)){
-    pts+=7;
-    signals.push({label:"Triadic list structure",
-      detail:"balanced \u201cA, B, and C\u201d listing \u2014 a frequent AI pattern",
-      pts:7});
+  if(commaCount>=2&&/\b(and|or)\b/.test(low)){
+    const enumPts=commaCount>=3?16:8;
+    pts+=enumPts;
+    signals.push({label:"Multi-item enumeration",
+      detail:(commaCount+1)+"-item list \u2014 AI loves exhaustive enumerations",
+      pts:enumPts});
   }
 
-  /* 6. no concrete detail — no digits, no proper specifics */
+  /* 6. hedging-adverb density — AI piles up "frequently / commonly /
+        often / typically / similarly" to sound authoritative. */
+  const HEDGE_ADV=/\b(frequently|commonly|often|typically|similarly|routinely|primarily|predominantly|generally|particularly|usually|normally|occasionally|mainly|largely|notably|arguably|opportunistically|incidentally|essentially)\b/gi;
+  const hedgeAdv=(sentence.match(HEDGE_ADV)||[]).length;
+  if(hedgeAdv>=2){
+    const p=Math.min(18,hedgeAdv*7);
+    pts+=p;
+    signals.push({label:"Stacked hedging adverbs",
+      detail:hedgeAdv+" hedging adverbs in one sentence",pts:p});
+  }else if(hedgeAdv===1&&wc<24){
+    pts+=4;
+    signals.push({label:"Hedging adverb",
+      detail:"a hedging adverb in a short sentence",pts:4});
+  }
+
+  /* 7. stative voice density — clinical-AI prefers
+        "X is Y" / "X are Y" / "X remain Y" over active verbs. */
+  const beHits=(sentence.match(
+    /\b(is|are|was|were|been|remain|remains|appear|appears|seem|seems)\b/gi
+  )||[]).length;
+  if(beHits>=2){
+    const p=Math.min(12,beHits*5);
+    pts+=p;
+    signals.push({label:"Stative phrasing",
+      detail:beHits+" be-verbs in one sentence \u2014 passive, AI-like",
+      pts:p});
+  }
+
+  /* 8. no concrete detail — no digits, no proper specifics */
   const hasNumber=/\d/.test(sentence);
   if(wc>=12&&!hasNumber){
     pts+=4;
@@ -600,6 +657,18 @@ export default function Humanizer(){
     let docScore=weighted/totalWords;
     const aiCount=scored.filter(s=>s.verdict.key==="ai").length;
     if(aiCount>=Math.ceil(scored.length/2)&&scored.length>=3)docScore+=8;
+    /* Doc-level "clinical-AI passage" pattern: every sentence is
+       stative AND multiple hedging adverbs scattered through the
+       text AND no first/second-person pronouns. A strong combo. */
+    if(scored.length>=2){
+      const allStative=scored.every(s=>
+        /\b(is|are|was|were|remain|remains|appear|appears)\b/i.test(s.raw));
+      const docHedges=(workingText.match(
+        /\b(frequently|commonly|often|typically|similarly|routinely|primarily|predominantly|generally|particularly|usually|normally|occasionally|opportunistically|incidentally|essentially|notably|arguably)\b/gi
+      )||[]).length;
+      const hasFirstPerson=/\b(I|we|us|our|my|me|you|your)\b/.test(workingText);
+      if(allStative&&docHedges>=3&&!hasFirstPerson)docScore+=18;
+    }
     docScore=Math.max(0,Math.min(100,Math.round(docScore)));
     const counts={
       ai:scored.filter(s=>s.verdict.key==="ai").length,

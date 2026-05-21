@@ -623,29 +623,65 @@ function assembleText(tokens,swaps,phraseSwaps,phraseByStart){
    browser; the call goes direct to api.anthropic.com.
    ================================================================ */
 async function callClaudeAPI(apiKey,model,text){
-  const prompt="Rewrite the following text in natural, varied human "+
-    "English to lower its AI-detection score on tools like GPTZero. "+
-    "Specifically:\n\n"+
-    "- Convert passive / stative voice (\"X is identified\") to active "+
-    "voice (\"clinicians find X\") wherever it reads natural.\n"+
-    "- Vary sentence length dramatically. Mix short fragments with "+
-    "longer sentences. Avoid uniform rhythm.\n"+
-    "- Use contractions (it is -> it's, do not -> don't, cannot -> "+
-    "can't).\n"+
-    "- Strip formulaic transitions (Moreover, Furthermore, In "+
-    "conclusion, It is important to note that, ...).\n"+
-    "- Avoid stacking hedging adverbs (frequently, commonly, often, "+
-    "typically, similarly). Pick at most one per sentence.\n"+
-    "- Replace em-dashes with commas or periods.\n"+
-    "- Add concrete specifics (numbers, named conditions, real "+
-    "examples) where the meaning allows.\n"+
-    "- Keep ALL factual content, technical terms (medical / legal / "+
-    "scientific jargon), and the original meaning intact.\n"+
-    "- Match the original register (formal stays formal, casual "+
-    "casual).\n\n"+
-    "Output ONLY the rewritten text. No preamble, no explanation, "+
-    "no surrounding quotation marks.\n\n"+
-    "TEXT TO REWRITE:\n"+text;
+  const systemPrompt=[
+    "You are rewriting AI-generated text so that GPTZero and other AI",
+    "detectors classify it as human-written. Your goal: score under 30%",
+    "AI on GPTZero.",
+    "",
+    "HARD BAN — never use any of these words or phrases in your output.",
+    "If the original uses them, replace with a plain alternative or just",
+    "drop the sentence and rewrite the meaning:",
+    "  cutting-edge, state-of-the-art, innovative, innovation,",
+    "  framework, ecosystem, landscape, tapestry, paradigm,",
+    "  streamline, facilitate, leverage, harness, navigate, empower,",
+    "  robust, comprehensive, seamless, data-driven, holistic, dynamic,",
+    "  plays a critical role, plays a vital role, plays a key role,",
+    "  in today's world, in the realm of, in the world of,",
+    "  moreover, furthermore, additionally, consequently, ultimately,",
+    "  it is important to note, it is worth noting, it should be noted,",
+    "  delve into, shed light on, dive into, navigate the complexities,",
+    "  rich tapestry, ever-evolving, fast-paced, game-changer,",
+    "  em-dashes (—). Use commas or periods instead.",
+    "",
+    "REQUIRED in your output:",
+    "  1. At least 2 contractions (it's, don't, won't, isn't, you're,",
+    "     they're, that's, etc.). If the source has no chance for one,",
+    "     reshape a sentence so it does.",
+    "  2. At least one sentence under 9 words. Punchy. A fragment is OK.",
+    "  3. At least one sentence of 20+ words for contrast.",
+    "  4. Vary sentence length dramatically — never two in a row of",
+    "     similar length.",
+    "  5. Active voice as the default. Convert \"X is identified\" to",
+    "     \"clinicians find X\" / \"we find X\" wherever it reads natural.",
+    "  6. Cap hedging adverbs (frequently, commonly, often, typically,",
+    "     similarly, routinely, particularly) at ONE for the whole",
+    "     paragraph.",
+    "  7. At most one passive-voice clause per paragraph.",
+    "  8. Add 1-2 concrete specifics where the meaning allows (a real",
+    "     drug, a real number, a year). Only if you are certain the",
+    "     specific is correct for the topic — never invent facts.",
+    "",
+    "VOICE: write like a working professional jotting a draft for a",
+    "colleague, not polishing for publication. Slightly direct,",
+    "occasionally opinionated, plain language. NOT essay style.",
+    "It is fine to start a sentence with \"And\" or \"But\".",
+    "",
+    "PRESERVE:",
+    "  - All factual content from the source.",
+    "  - All technical / medical / scientific terms (drug names,",
+    "    conditions, named protocols).",
+    "  - The original meaning and approximate length.",
+    "  - The original register (don't make formal text casual or",
+    "    casual text formal — but make BOTH more human).",
+    "",
+    "FORBIDDEN:",
+    "  - Inventing facts not in the source.",
+    "  - Changing the topic.",
+    "  - Adding any preamble, header, label, or explanation.",
+    "  - Wrapping the output in quotation marks.",
+    "",
+    "OUTPUT: only the rewritten text. Nothing else.",
+  ].join("\n");
 
   const r=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
@@ -658,7 +694,8 @@ async function callClaudeAPI(apiKey,model,text){
     body:JSON.stringify({
       model,
       max_tokens:4096,
-      messages:[{role:"user",content:prompt}],
+      system:systemPrompt,
+      messages:[{role:"user",content:"TEXT TO REWRITE:\n\n"+text}],
     }),
   });
   if(!r.ok){

@@ -603,6 +603,37 @@ function assembleText(tokens,swaps,phraseSwaps,phraseByStart){
    instead of the offline transforms. The key never leaves the
    browser; the call goes direct to api.anthropic.com.
    ================================================================ */
+const HUMAN_STYLE_EXAMPLES=[
+  "STYLE REFERENCE — these are excerpts of real human writing. Imitate",
+  "their natural rhythm, fragments, and personal voice. Do NOT copy",
+  "their wording; copy their FEEL.",
+  "",
+  "EXAMPLE A (clinical, informal):",
+  "Most GPs catch hypertension by accident. Someone comes in for a",
+  "med review, you check their BP because the protocol says so, and",
+  "there it is. 162 over 95. They feel fine. That's the trouble with",
+  "silent killers. You don't go looking unless something nudges you",
+  "to check.",
+  "",
+  "EXAMPLE B (clinical, slightly formal):",
+  "There's no quick fix for dyslipidaemia. We've tried lifestyle",
+  "stuff for years and most people slide back within a few months.",
+  "Statins are where the numbers actually move. Start a moderate-",
+  "intensity one, recheck the lipids in three months, titrate up if",
+  "the LDL hasn't come down enough.",
+  "",
+  "EXAMPLE C (general technical):",
+  "The build's been flaky for a week. Tests pass locally, fail in CI",
+  "about half the time. Looks like a race condition in the test setup.",
+  "I bisected it back to the migration script. We probably need a",
+  "sync point before the first query runs.",
+  "",
+  "Notice how the examples use: short punchy sentences, sentence",
+  "fragments, contractions, plain words, occasional first-person,",
+  "specifics (162/95, three months, half the time), and zero AI",
+  "cliches. Match THIS register.",
+].join("\n");
+
 const HUMANIZE_SYSTEM_PROMPT=[
   "You are rewriting AI-generated text so that GPTZero and other AI",
   "detectors classify it as human-written. Your goal: score under 30%",
@@ -623,12 +654,20 @@ const HUMANIZE_SYSTEM_PROMPT=[
   "  rich tapestry, ever-evolving, fast-paced, game-changer,",
   "  em-dashes (—). Use commas or periods instead.",
   "",
+  "ALSO BAN these structural patterns:",
+  "  - 4+ item lists (\"A, B, C, and D\" or \"A, B, C, or D\"). Cap at 3",
+  "    items max, or split into two sentences.",
+  "  - Colon-then-list openings (\"There are three things: X, Y, Z\").",
+  "  - Three or more commas in a single sentence.",
+  "  - Two consecutive sentences with the same opening template",
+  "    (\"X is Y. X is Z.\").",
+  "",
   "REQUIRED in your output:",
   "  1. At least 2 contractions (it's, don't, won't, isn't, you're,",
   "     they're, that's, etc.). If the source has no chance for one,",
   "     reshape a sentence so it does.",
   "  2. At least one sentence under 9 words. Punchy. A fragment is OK.",
-  "  3. At least one sentence of 20+ words for contrast.",
+  "  3. At least one sentence of 18+ words for contrast.",
   "  4. Vary sentence length dramatically — never two in a row of",
   "     similar length.",
   "  5. Active voice as the default. Convert \"X is identified\" to",
@@ -637,7 +676,9 @@ const HUMANIZE_SYSTEM_PROMPT=[
   "     similarly, routinely, particularly) at ONE for the whole",
   "     paragraph.",
   "  7. At most one passive-voice clause per paragraph.",
-  "  8. Add 1-2 concrete specifics where the meaning allows (a real",
+  "  8. Use first-person plural (\"we\") or generic subject (\"you\") at",
+  "     least once if the topic allows it.",
+  "  9. Add 1-2 concrete specifics where the meaning allows (a real",
   "     drug, a real number, a year). Only if you are certain the",
   "     specific is correct for the topic — never invent facts.",
   "",
@@ -681,8 +722,10 @@ const REFINE_SYSTEM_PROMPT=[
   "    often, typically, similarly, routinely, particularly)",
   "  - Passive / stative voice in more than one sentence",
   "  - Any em-dash",
+  "  - Any 4+ item list, colon-then-list, or sentence with 3+ commas",
   "  - No sentence under 9 words (need at least one short / punchy one)",
-  "  - No sentence over 20 words (need at least one longer one)",
+  "  - No sentence over 18 words (need at least one longer one)",
+  "  - No first-person plural (\"we\") or generic \"you\"",
   "",
   "Apply the same HARD BAN list and the same REQUIRED idiosyncrasies",
   "as the first pass. Preserve all factual content, all technical /",
@@ -721,13 +764,29 @@ async function claudeMessage(apiKey,model,system,user){
   return data.content[0].text.trim();
 }
 
-async function callClaudeAPI(apiKey,model,text,twoPass,onProgress){
+/* Build the system prompt with built-in human examples and an optional
+   user-provided writing sample. The user sample, if present, is the
+   primary style reference Claude tries to imitate. */
+function buildHumanizePrompt(basePrompt,userSample){
+  let s=basePrompt+"\n\n"+HUMAN_STYLE_EXAMPLES;
+  if(userSample&&userSample.trim().length>=40){
+    s+="\n\nUSER'S OWN WRITING SAMPLE — this is the HIGHEST-priority "+
+       "style reference. Imitate this voice, rhythm, and word choice "+
+       "above all else. Do NOT copy the wording; copy the FEEL.\n\n"+
+       userSample.trim();
+  }
+  return s;
+}
+
+async function callClaudeAPI(apiKey,model,text,twoPass,userSample,onProgress){
+  const humanizeSys=buildHumanizePrompt(HUMANIZE_SYSTEM_PROMPT,userSample);
+  const refineSys=buildHumanizePrompt(REFINE_SYSTEM_PROMPT,userSample);
   if(onProgress)onProgress({pass:1,total:twoPass?2:1});
-  const first=await claudeMessage(apiKey,model,HUMANIZE_SYSTEM_PROMPT,
+  const first=await claudeMessage(apiKey,model,humanizeSys,
     "TEXT TO REWRITE:\n\n"+text);
   if(!twoPass)return first;
   if(onProgress)onProgress({pass:2,total:2});
-  const second=await claudeMessage(apiKey,model,REFINE_SYSTEM_PROMPT,
+  const second=await claudeMessage(apiKey,model,refineSys,
     "ORIGINAL TEXT:\n"+text+"\n\nFIRST REWRITE (improve this):\n"+first);
   return second;
 }
@@ -760,9 +819,11 @@ export default function Humanizer(){
   const [apiKey,setApiKey]=useState("");
   const [llmModel,setLlmModel]=useState("claude-sonnet-4-6");
   const [useTwoPass,setUseTwoPass]=useState(true);
+  const [styleSample,setStyleSample]=useState("");
+  const [showStyleBox,setShowStyleBox]=useState(false);
   const [autoError,setAutoError]=useState("");
 
-  /* Load saved key/model/two-pass from localStorage on mount;
+  /* Load saved key/model/two-pass/style from localStorage on mount;
      persist on every change. */
   useEffect(()=>{
     try{
@@ -772,6 +833,8 @@ export default function Humanizer(){
       if(m)setLlmModel(m);
       const tp=localStorage.getItem("humanizer_two_pass");
       if(tp!==null)setUseTwoPass(tp==="1");
+      const st=localStorage.getItem("humanizer_style_sample");
+      if(st){setStyleSample(st);setShowStyleBox(true);}
     }catch(_){}
   },[]);
   useEffect(()=>{
@@ -786,6 +849,13 @@ export default function Humanizer(){
   useEffect(()=>{
     try{localStorage.setItem("humanizer_two_pass",useTwoPass?"1":"0");}catch(_){}
   },[useTwoPass]);
+  useEffect(()=>{
+    try{
+      if(styleSample.trim())
+        localStorage.setItem("humanizer_style_sample",styleSample);
+      else localStorage.removeItem("humanizer_style_sample");
+    }catch(_){}
+  },[styleSample]);
 
   /* current working text = raw with all swaps applied */
   const tokens=useMemo(()=>tokenize(raw),[raw]);
@@ -896,6 +966,7 @@ export default function Humanizer(){
         const total=useTwoPass?2:1;
         setAutoProgress({done:0,total});
         const rewritten=await callClaudeAPI(apiKey,llmModel,raw,useTwoPass,
+          styleSample,
           p=>setAutoProgress({done:p.pass-1,total:p.total}));
         setRawBackup(raw);
         setRaw(rewritten);
@@ -986,7 +1057,7 @@ export default function Humanizer(){
     setActive(null);setActivePhrase(null);setOpenSentence(null);
     setAutoBusy(false);
     setAutoProgress({done:0,total:0});
-  },[autoBusy,apiKey,llmModel,useTwoPass,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
+  },[autoBusy,apiKey,llmModel,useTwoPass,styleSample,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
 
   const undoAuto=useCallback(()=>{
     if(rawBackup===null)return;
@@ -1215,6 +1286,32 @@ export default function Humanizer(){
                 then critiques and tightens its own output.
                 Better humanization, costs 2&times; per click.</span>
             </label>
+          )}
+          {apiKey&&(
+            <div style={S.styleSection}>
+              <button style={S.styleToggle}
+                onClick={()=>setShowStyleBox(v=>!v)}
+                type="button">
+                {showStyleBox?"▾":"▸"}{" "}
+                Your writing sample {styleSample.trim().length>=40?"✓":"(optional)"}
+              </button>
+              {showStyleBox&&(
+                <div>
+                  <textarea
+                    value={styleSample}
+                    onChange={e=>setStyleSample(e.target.value)}
+                    placeholder={"Paste a paragraph of your own writing (40+ chars). Claude will imitate your personal voice — the single highest-leverage thing for beating GPTZero."}
+                    style={S.styleBox}
+                    rows={4}
+                    spellCheck={false}/>
+                  <p style={S.styleHint}>
+                    {styleSample.trim().length>=40
+                      ?("Using your sample ("+styleSample.trim().length+" chars) as the primary style reference.")
+                      :"Tip: paste 2-3 sentences of something you actually wrote. The more idiosyncratic the better."}
+                  </p>
+                </div>
+              )}
+            </div>
           )}
           <p style={S.llmHint}>
             {apiKey
@@ -2006,6 +2103,16 @@ const S={
   twoPassRow:{display:"flex",alignItems:"flex-start",gap:8,marginTop:10,
     fontSize:12.5,color:"#334155",lineHeight:1.5,
     fontFamily:"ui-sans-serif, system-ui, sans-serif",cursor:"pointer"},
+  styleSection:{marginTop:10,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  styleToggle:{background:"none",border:"none",padding:0,
+    fontSize:12.5,color:"#334155",cursor:"pointer",fontWeight:600,
+    fontFamily:"inherit"},
+  styleBox:{width:"100%",border:"1px solid #cbd5e1",borderRadius:7,
+    padding:"8px 10px",fontSize:13,lineHeight:1.5,marginTop:6,
+    fontFamily:"inherit",resize:"vertical",outline:"none",
+    boxSizing:"border-box"},
+  styleHint:{fontSize:11.5,color:"#64748b",margin:"4px 0 0",lineHeight:1.5},
   errBox:{marginTop:10,padding:"8px 12px",border:"1px solid #fca5a5",
     background:"#fef2f2",borderRadius:7,fontSize:12.5,color:"#991b1b",
     fontFamily:"ui-monospace, monospace",wordBreak:"break-word"},

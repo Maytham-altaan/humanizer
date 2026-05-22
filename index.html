@@ -585,6 +585,30 @@ function applySentenceTransforms(text){
   return s.trim();
 }
 
+/* Safety-net polish applied on top of Claude's output. Only the
+   transforms that can't degrade Claude's careful sentence structure:
+   em-dash removal, opener stripping, contraction forcing. No sentence
+   splitting (Claude already varies length deliberately). */
+function polishLLMOutput(text){
+  let s=text;
+  PADDING_STRIPS.forEach(re=>{
+    const g=new RegExp("(^|[.!?]\\s+)"+re.source+"([a-z])","gi");
+    s=s.replace(g,(_m,p,c)=>p+c.toUpperCase());
+  });
+  OPENER_STRIPS.forEach(o=>{
+    const esc=o.replace(/[.*+?^${}()|[\]\\]/g,"\\$&").replace(/\s/g,"\\s");
+    const re=new RegExp("(^|[.!?]\\s+)"+esc+",\\s+([a-z])","gi");
+    s=s.replace(re,(_m,p,c)=>p+c.toUpperCase());
+  });
+  OPENER_REWRITES.forEach(([re,sub])=>{s=s.replace(re,sub);});
+  CONTRACTIONS.forEach(([re,sub])=>{s=s.replace(re,sub);});
+  s=s.replace(/\s*[—–]\s*/g,", ");
+  s=s.replace(/\s+--\s+/g,", ");
+  s=s.replace(/\s+([.,;:!?])/g,"$1");
+  s=s.replace(/\s{2,}/g," ");
+  return s.trim();
+}
+
 function splitLongSentences(text,threshold){
   return text.replace(/[^.!?]+[.!?]+/g,sentence=>{
     const wc=(sentence.match(/\b[a-zA-Z]+\b/g)||[]).length;
@@ -987,8 +1011,11 @@ function Humanizer(){
         const rewritten=await callClaudeAPI(apiKey,llmModel,raw,useTwoPass,
           styleSample,
           p=>setAutoProgress({done:p.pass-1,total:p.total}));
+        /* Belt-and-suspenders: strip any em-dash / formulaic opener
+           that survived Claude's pass, force common contractions. */
+        const polished=polishLLMOutput(rewritten);
         setRawBackup(raw);
-        setRaw(rewritten);
+        setRaw(polished);
         setSwaps({});setPhraseSwaps({});
         setActive(null);setActivePhrase(null);setOpenSentence(null);
         setAutoProgress({done:total,total});

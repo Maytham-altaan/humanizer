@@ -1234,10 +1234,14 @@ function Humanizer(){
           const total=tasks.length*(useTwoPass?2:1);
           setAutoProgress({done:0,total});
           let done=0;
-          /* Three workers in parallel — fast enough that a 50-paragraph
-             doc finishes in ~1 minute, safe under Claude's rate limits. */
-          const CONCURRENCY=3;
+          /* Two workers in parallel — safe under Claude's rate limits.
+             Errors per paragraph are collected so we can surface them
+             rather than silently fall back to the original text (which
+             would make the download identical to the upload). */
+          const CONCURRENCY=2;
           const queue=tasks.slice();
+          const errors=[];
+          let succeeded=0;
           async function worker(){
             while(queue.length>0){
               const task=queue.shift();
@@ -1247,7 +1251,9 @@ function Humanizer(){
                   task.originalText,useTwoPass,llmMode,styleSample,null);
                 task.currentText=llmMode==="paraphrase"
                   ?result:polishLLMOutput(result);
-              }catch(_){
+                succeeded++;
+              }catch(e){
+                errors.push(e.message||String(e));
                 task.currentText=task.originalText;
               }
               done+=(useTwoPass?2:1);
@@ -1255,6 +1261,19 @@ function Humanizer(){
             }
           }
           await Promise.all(Array.from({length:CONCURRENCY},()=>worker()));
+          /* If everything failed there's nothing to download that's
+             different — tell the user clearly instead of letting them
+             open an unchanged file. */
+          if(succeeded===0&&tasks.length>0){
+            throw new Error("All "+tasks.length+
+              " paragraphs failed. First error: "+errors[0]);
+          }
+          if(errors.length>0){
+            setAutoError("Paraphrased "+succeeded+"/"+tasks.length+
+              " paragraphs. "+errors.length+
+              " failed (first error: "+errors[0]+"). "+
+              "Failed paragraphs kept their original text.");
+          }
           /* Rebuild the textarea preview from updated paragraphs. */
           const rebuilt=struct.paragraphs
             .map(p=>p.currentText)

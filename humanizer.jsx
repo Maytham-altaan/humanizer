@@ -760,6 +760,80 @@ const REFINE_SYSTEM_PROMPT=[
   "preamble, no labels, no quotation marks.",
 ].join("\n");
 
+const PARAPHRASE_SYSTEM_PROMPT=[
+  "You are a paraphraser, NOT a humanizer. Your job: rewrite the input",
+  "text by replacing as many words as possible with synonyms, while",
+  "keeping the meaning identical. The output does NOT need to sound",
+  "more human. It needs to use DIFFERENT WORDS than the input. This is",
+  "QuillBot-style lexical paraphrasing.",
+  "",
+  "Replace every content word with a synonym where possible:",
+  "  - Nouns: different noun, same meaning",
+  "  - Verbs: different verb, or change voice (active <-> passive)",
+  "  - Adjectives: different adjective, same meaning",
+  "  - Adverbs: different adverb, or drop entirely",
+  "",
+  "Restructure where grammar allows:",
+  "  - Active <-> passive voice",
+  "  - Reorder clauses inside a sentence",
+  "  - Combine two short sentences into one, or split a long sentence",
+  "  - Move adverbs / adjective phrases to different positions",
+  "  - Convert \"we do X\" to \"X is done\" or vice versa",
+  "",
+  "Examples of GOOD paraphrase pairs (notice how aggressively the",
+  "wording changes while meaning stays identical):",
+  "  - \"we mostly pick up hypertension by chance\" ->",
+  "    \"hypertension is typically discovered by accident\"",
+  "  - \"patients feel fine for years\" ->",
+  "    \"for years, patients remain in good health\"",
+  "  - \"Dyslipidaemia's much the same story\" ->",
+  "    \"the same is true with dyslipidaemia\"",
+  "  - \"tends to surface after a cardiovascular risk assessment\" ->",
+  "    \"usually appears following a cardiovascular risk assessment\"",
+  "  - \"my prescribing scope covers\" ->",
+  "    \"my prescribing scope is limited to\"",
+  "",
+  "PRESERVE EXACTLY:",
+  "  - All factual content",
+  "  - All technical / medical / scientific terms (drug names,",
+  "    conditions, named protocols, abbreviations like NHS, QRISK,",
+  "    BP, LDL)",
+  "  - All numbers, dates, proper nouns",
+  "  - The original meaning",
+  "  - The approximate length",
+  "  - The original register (formal stays formal)",
+  "",
+  "DO NOT:",
+  "  - Try to make the text \"sound more human\" — that's a different",
+  "    mode. Do not add contractions, fragments, casual asides, or",
+  "    personal voice unless they were already there.",
+  "  - Invent facts not in the source.",
+  "  - Change technical terms or proper nouns.",
+  "  - Add preamble, header, label, or explanation.",
+  "  - Wrap the output in quotation marks.",
+  "",
+  "OUTPUT: only the paraphrased text. Nothing else.",
+].join("\n");
+
+const PARAPHRASE_REFINE_PROMPT=[
+  "You previously paraphrased an AI-generated passage. Look at your",
+  "first paraphrase below and refine it. Goal: maximise lexical and",
+  "structural divergence from the original while preserving meaning.",
+  "",
+  "Check the FIRST PARAPHRASE for:",
+  "  - Words that still match the original — replace with synonyms",
+  "  - Sentences with the same structure as the original — restructure",
+  "    (swap voice, reorder clauses, combine or split)",
+  "  - Adjacent sentences with similar templates — vary the second one",
+  "",
+  "Preserve all factual content, all technical terms, numbers, proper",
+  "nouns, and the original meaning. Do not humanize — this is still",
+  "lexical paraphrasing.",
+  "",
+  "OUTPUT: only the improved paraphrase. No critique commentary, no",
+  "preamble, no labels, no quotation marks.",
+].join("\n");
+
 async function claudeMessage(apiKey,model,system,user){
   const r=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
@@ -802,16 +876,25 @@ function buildHumanizePrompt(basePrompt,userSample){
   return s;
 }
 
-async function callClaudeAPI(apiKey,model,text,twoPass,userSample,onProgress){
-  const humanizeSys=buildHumanizePrompt(HUMANIZE_SYSTEM_PROMPT,userSample);
-  const refineSys=buildHumanizePrompt(REFINE_SYSTEM_PROMPT,userSample);
+async function callClaudeAPI(apiKey,model,text,twoPass,mode,userSample,onProgress){
+  let firstSys,refineSys,firstLabel,refineFirstLabel;
+  if(mode==="paraphrase"){
+    firstSys=PARAPHRASE_SYSTEM_PROMPT;
+    refineSys=PARAPHRASE_REFINE_PROMPT;
+    firstLabel="TEXT TO PARAPHRASE:\n\n";
+    refineFirstLabel="FIRST PARAPHRASE (improve this):\n";
+  }else{
+    firstSys=buildHumanizePrompt(HUMANIZE_SYSTEM_PROMPT,userSample);
+    refineSys=buildHumanizePrompt(REFINE_SYSTEM_PROMPT,userSample);
+    firstLabel="TEXT TO REWRITE:\n\n";
+    refineFirstLabel="FIRST REWRITE (improve this):\n";
+  }
   if(onProgress)onProgress({pass:1,total:twoPass?2:1});
-  const first=await claudeMessage(apiKey,model,humanizeSys,
-    "TEXT TO REWRITE:\n\n"+text);
+  const first=await claudeMessage(apiKey,model,firstSys,firstLabel+text);
   if(!twoPass)return first;
   if(onProgress)onProgress({pass:2,total:2});
   const second=await claudeMessage(apiKey,model,refineSys,
-    "ORIGINAL TEXT:\n"+text+"\n\nFIRST REWRITE (improve this):\n"+first);
+    "ORIGINAL TEXT:\n"+text+"\n\n"+refineFirstLabel+first);
   return second;
 }
 
@@ -843,6 +926,7 @@ export default function Humanizer(){
   const [apiKey,setApiKey]=useState("");
   const [llmModel,setLlmModel]=useState("claude-sonnet-4-6");
   const [useTwoPass,setUseTwoPass]=useState(true);
+  const [llmMode,setLlmMode]=useState("paraphrase"); // paraphrase | humanize
   const [styleSample,setStyleSample]=useState("");
   const [showStyleBox,setShowStyleBox]=useState(false);
   const [autoError,setAutoError]=useState("");
@@ -857,6 +941,8 @@ export default function Humanizer(){
       if(m)setLlmModel(m);
       const tp=localStorage.getItem("humanizer_two_pass");
       if(tp!==null)setUseTwoPass(tp==="1");
+      const md=localStorage.getItem("humanizer_llm_mode");
+      if(md==="paraphrase"||md==="humanize")setLlmMode(md);
       const st=localStorage.getItem("humanizer_style_sample");
       if(st){setStyleSample(st);setShowStyleBox(true);}
     }catch(_){}
@@ -873,6 +959,9 @@ export default function Humanizer(){
   useEffect(()=>{
     try{localStorage.setItem("humanizer_two_pass",useTwoPass?"1":"0");}catch(_){}
   },[useTwoPass]);
+  useEffect(()=>{
+    try{localStorage.setItem("humanizer_llm_mode",llmMode);}catch(_){}
+  },[llmMode]);
   useEffect(()=>{
     try{
       if(styleSample.trim())
@@ -990,13 +1079,15 @@ export default function Humanizer(){
         const total=useTwoPass?2:1;
         setAutoProgress({done:0,total});
         const rewritten=await callClaudeAPI(apiKey,llmModel,raw,useTwoPass,
-          styleSample,
+          llmMode,styleSample,
           p=>setAutoProgress({done:p.pass-1,total:p.total}));
-        /* Belt-and-suspenders: strip any em-dash / formulaic opener
-           that survived Claude's pass, force common contractions. */
-        const polished=polishLLMOutput(rewritten);
+        /* In Humanize mode we polish (contractions, em-dash kill, opener
+           strip). In Paraphrase mode we leave Claude's output untouched —
+           the whole point is lexical divergence, not human-style polish. */
+        const finalText=llmMode==="paraphrase"
+          ?rewritten:polishLLMOutput(rewritten);
         setRawBackup(raw);
-        setRaw(polished);
+        setRaw(finalText);
         setSwaps({});setPhraseSwaps({});
         setActive(null);setActivePhrase(null);setOpenSentence(null);
         setAutoProgress({done:total,total});
@@ -1084,7 +1175,7 @@ export default function Humanizer(){
     setActive(null);setActivePhrase(null);setOpenSentence(null);
     setAutoBusy(false);
     setAutoProgress({done:0,total:0});
-  },[autoBusy,apiKey,llmModel,useTwoPass,styleSample,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
+  },[autoBusy,apiKey,llmModel,useTwoPass,llmMode,styleSample,raw,swaps,phraseSwaps,tokens,phraseByStart,coveredByPhrase]);
 
   const undoAuto=useCallback(()=>{
     if(rawBackup===null)return;
@@ -1285,6 +1376,23 @@ export default function Humanizer(){
               <div style={S.metricHint}>higher = more human</div>
             </div>
           </div>
+          {apiKey&&(
+            <div style={S.modeRow}>
+              <span style={S.modeLabel}>Mode</span>
+              <button type="button"
+                style={{...S.modeBtn,...(llmMode==="paraphrase"?S.modeBtnActive:{})}}
+                onClick={()=>setLlmMode("paraphrase")}
+                disabled={autoBusy}>
+                Paraphrase
+              </button>
+              <button type="button"
+                style={{...S.modeBtn,...(llmMode==="humanize"?S.modeBtnActive:{})}}
+                onClick={()=>setLlmMode("humanize")}
+                disabled={autoBusy}>
+                Humanize
+              </button>
+            </div>
+          )}
           <div style={S.llmRow}>
             <input
               type="password"
@@ -1314,7 +1422,7 @@ export default function Humanizer(){
                 Better humanization, costs 2&times; per click.</span>
             </label>
           )}
-          {apiKey&&(
+          {apiKey&&llmMode==="humanize"&&(
             <div style={S.styleSection}>
               <button style={S.styleToggle}
                 onClick={()=>setShowStyleBox(v=>!v)}
@@ -1341,9 +1449,11 @@ export default function Humanizer(){
             </div>
           )}
           <p style={S.llmHint}>
-            {apiKey
-              ?"Claude will rewrite the text in active voice with varied sentence shapes — the path that actually beats GPTZero. Key stays in your browser only."
-              :"Optional: paste an Anthropic key for real LLM rewriting. Without one, the button uses offline transforms only. Get a key at console.anthropic.com ($5 free credits)."}
+            {!apiKey
+              ?"Optional: paste an Anthropic key for real LLM rewriting. Without one, the button uses offline transforms only. Get a key at console.anthropic.com ($5 free credits)."
+              :llmMode==="paraphrase"
+                ?"Paraphrase mode — Claude swaps words and shuffles structure (QuillBot-style). Output may still read AI-like, but it breaks the token sequence GPTZero learned. Best for beating detectors on formal/clinical text."
+                :"Humanize mode — Claude rewrites in personal voice with contractions, varied sentences, fragments. Better for casual or first-person text where you want the output to sound like a real person wrote it."}
           </p>
           <div style={S.autoRow}>
             <button
@@ -1359,7 +1469,8 @@ export default function Humanizer(){
                         ?Math.round(autoProgress.done/autoProgress.total*100)+"%"
                         :"")))
                 :(apiKey
-                    ?("Auto-humanize via Claude"+(useTwoPass?" (2-pass)":""))
+                    ?((llmMode==="paraphrase"?"Paraphrase":"Humanize")
+                      +" via Claude"+(useTwoPass?" (2-pass)":""))
                     :"Auto-humanize (offline)")}
             </button>
             {rawBackup!==null&&(
@@ -2118,7 +2229,15 @@ const S={
     padding:"10px 18px",fontSize:14,fontWeight:700,cursor:"pointer",
     minWidth:170},
   btnAutoBusy:{background:"#64748b",cursor:"wait"},
-  llmRow:{display:"flex",gap:8,marginTop:14,flexWrap:"wrap",
+  modeRow:{display:"flex",gap:6,marginTop:14,alignItems:"center",
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  modeLabel:{fontSize:11,fontWeight:700,letterSpacing:"0.06em",
+    textTransform:"uppercase",color:"#94a3b8",marginRight:6},
+  modeBtn:{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:7,
+    padding:"6px 14px",fontSize:13,fontWeight:600,color:"#475569",
+    cursor:"pointer",fontFamily:"inherit"},
+  modeBtnActive:{background:"#0f172a",color:"#fff",borderColor:"#0f172a"},
+  llmRow:{display:"flex",gap:8,marginTop:10,flexWrap:"wrap",
     fontFamily:"ui-sans-serif, system-ui, sans-serif"},
   llmKey:{flex:"1 1 260px",border:"1px solid #cbd5e1",borderRadius:7,
     padding:"8px 10px",fontSize:13,fontFamily:"ui-monospace, monospace",

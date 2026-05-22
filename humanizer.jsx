@@ -590,6 +590,41 @@ function polishLLMOutput(text){
   return s.trim();
 }
 
+/* Build a minimal .docx file from plain text using JSZip. .docx is
+   just a ZIP of XML files; for plain paragraphs we only need three:
+   [Content_Types].xml, _rels/.rels, and word/document.xml. */
+function escapeXml(s){
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+}
+async function buildDocxBlob(text){
+  if(typeof window.JSZip==="undefined"){
+    throw new Error("DOCX builder still loading — try again in a moment.");
+  }
+  const zip=new window.JSZip();
+  zip.file("[Content_Types].xml",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'+
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'+
+    '<Default Extension="xml" ContentType="application/xml"/>'+
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'+
+    "</Types>");
+  zip.folder("_rels").file(".rels",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'+
+    "</Relationships>");
+  const paragraphs=text.split(/\n+/).map(p=>{
+    const safe=escapeXml(p);
+    return '<w:p><w:r><w:t xml:space="preserve">'+safe+"</w:t></w:r></w:p>";
+  }).join("");
+  zip.folder("word").file("document.xml",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'+
+    "<w:body>"+paragraphs+"</w:body></w:document>");
+  return zip.generateAsync({type:"blob"});
+}
+
 function splitLongSentences(text,threshold){
   return text.replace(/[^.!?]+[.!?]+/g,sentence=>{
     const wc=(sentence.match(/\b[a-zA-Z]+\b/g)||[]).length;
@@ -1239,6 +1274,24 @@ export default function Humanizer(){
 
   const copyOutput=()=>navigator.clipboard&&navigator.clipboard.writeText(workingText);
 
+  const downloadOutput=useCallback(async()=>{
+    if(!workingText.trim())return;
+    try{
+      const blob=await buildDocxBlob(workingText);
+      const url=URL.createObjectURL(blob);
+      const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+      const a=document.createElement("a");
+      a.href=url;
+      a.download="humanizer-"+stamp+".docx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }catch(err){
+      setAutoError("Download error: "+(err.message||String(err)));
+    }
+  },[workingText]);
+
   /* -------- HUMANIZER canvas (word/phrase swapping) -------- */
   /* render a single word or phrase token as a clickable span */
   function renderWordToken(i){
@@ -1648,7 +1701,13 @@ export default function Humanizer(){
       <section style={{...S.card,...S.outputCard}}>
         <div style={S.outHead}>
           <label style={S.label}>Working text</label>
-          <button style={S.btnCopy} onClick={copyOutput}>Copy</button>
+          <div style={S.outActions}>
+            <button style={S.btnDownload} onClick={downloadOutput}
+              disabled={!workingText.trim()}>
+              ⬇ Download .docx
+            </button>
+            <button style={S.btnCopy} onClick={copyOutput}>Copy</button>
+          </div>
         </div>
         <p style={S.output}>{workingText}</p>
       </section>
@@ -2369,6 +2428,12 @@ const S={
     marginLeft:"auto"},
   outHead:{display:"flex",justifyContent:"space-between",alignItems:"center"},
   output:{fontSize:17,lineHeight:1.75,margin:"4px 0 0",color:"#0f172a"},
+  outActions:{display:"flex",gap:8,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  btnDownload:{background:"#fff",color:"#0f172a",
+    border:"1px solid #cbd5e1",borderRadius:7,
+    padding:"7px 14px",fontSize:13,fontWeight:600,cursor:"pointer",
+    fontFamily:"inherit"},
   btnCopy:{background:"#0f172a",color:"#fff",border:"none",borderRadius:7,
     padding:"6px 16px",fontSize:13,cursor:"pointer",
     fontFamily:"ui-sans-serif, system-ui, sans-serif"},

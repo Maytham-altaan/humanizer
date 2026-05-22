@@ -646,6 +646,87 @@ async function buildDocxBlob(text){
   return zip.generateAsync({type:"blob"});
 }
 
+/* ================================================================
+   STRUCTURED .docx ROUND-TRIP
+   ----------------------------------------------------------------
+   When the user uploads a .docx we keep the original ArrayBuffer in
+   memory plus a list of paragraph texts. On download we re-load the
+   original ZIP, walk every <w:p>, and replace the runs' text with
+   the paraphrased version — preserving headings, lists, tables,
+   paragraph spacing, font choices, and document-level styles.
+
+   Per-run formatting (e.g. one bold word in a sentence) gets
+   flattened to the first run's formatting because the paraphrase
+   changes the word boundaries.
+   ================================================================ */
+const W_NS="http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+async function parseDocxStructure(arrayBuffer){
+  if(typeof window.JSZip==="undefined"){
+    throw new Error("DOCX builder still loading.");
+  }
+  const zip=await window.JSZip.loadAsync(arrayBuffer);
+  const docFile=zip.file("word/document.xml");
+  if(!docFile)throw new Error("Not a valid .docx (no word/document.xml).");
+  const xmlStr=await docFile.async("string");
+  const parser=new DOMParser();
+  const xmlDoc=parser.parseFromString(xmlStr,"text/xml");
+  if(xmlDoc.getElementsByTagName("parsererror").length){
+    throw new Error("Could not parse the .docx XML.");
+  }
+  const ps=xmlDoc.getElementsByTagNameNS(W_NS,"p");
+  const paragraphs=[];
+  for(let i=0;i<ps.length;i++){
+    const p=ps[i];
+    const ts=p.getElementsByTagNameNS(W_NS,"t");
+    let text="";
+    for(let j=0;j<ts.length;j++)text+=ts[j].textContent||"";
+    paragraphs.push({idx:i,originalText:text,currentText:text});
+  }
+  return {paragraphs};
+}
+
+async function rebuildDocxFromStructure(arrayBuffer,paragraphs){
+  const zip=await window.JSZip.loadAsync(arrayBuffer);
+  const xmlStr=await zip.file("word/document.xml").async("string");
+  const parser=new DOMParser();
+  const xmlDoc=parser.parseFromString(xmlStr,"text/xml");
+  const ps=xmlDoc.getElementsByTagNameNS(W_NS,"p");
+  for(let i=0;i<ps.length;i++){
+    const p=ps[i];
+    const stored=paragraphs[i];
+    if(!stored)continue;
+    if(stored.currentText===stored.originalText)continue;
+    const runs=p.getElementsByTagNameNS(W_NS,"r");
+    if(runs.length===0)continue;
+    /* Replace text in the first run with the paraphrased content;
+       remove subsequent runs. This collapses inline formatting but
+       keeps the paragraph-level style (heading, list, etc.). */
+    const firstRun=runs[0];
+    const ts=firstRun.getElementsByTagNameNS(W_NS,"t");
+    if(ts.length>0){
+      ts[0].textContent=stored.currentText;
+      ts[0].setAttribute("xml:space","preserve");
+      for(let j=ts.length-1;j>=1;j--)ts[j].parentNode.removeChild(ts[j]);
+    }else{
+      const tElem=xmlDoc.createElementNS(W_NS,"w:t");
+      tElem.setAttribute("xml:space","preserve");
+      tElem.textContent=stored.currentText;
+      firstRun.appendChild(tElem);
+    }
+    for(let j=runs.length-1;j>=1;j--){
+      runs[j].parentNode.removeChild(runs[j]);
+    }
+  }
+  const serializer=new XMLSerializer();
+  let newXml=serializer.serializeToString(xmlDoc);
+  if(!newXml.startsWith("<?xml")){
+    newXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+newXml;
+  }
+  zip.file("word/document.xml",newXml);
+  return zip.generateAsync({type:"blob"});
+}
+
 function splitLongSentences(text,threshold){
   return text.replace(/[^.!?]+[.!?]+/g,sentence=>{
     const wc=(sentence.match(/\b[a-zA-Z]+\b/g)||[]).length;
@@ -987,6 +1068,11 @@ function Humanizer(){
   const [showStyleBox,setShowStyleBox]=useState(false);
   const [autoError,setAutoError]=useState("");
   const fileInputRef=useRef(null);
+  /* When a .docx is uploaded we hold the original ArrayBuffer + a
+     list of paragraph texts here. Lets us paraphrase per-paragraph
+     and rebuild the .docx with all formatting intact on download. */
+  const docxStructureRef=useRef(null);
+  const [docxFileName,setDocxFileName]=useState("");
 
   /* Load saved key/model/two-pass/style from localStorage on mount;
      persist on every change. */
@@ -1133,21 +1219,68 @@ function Humanizer(){
        actually restructures sentences instead of swapping words. */
     if(apiKey){
       try{
-        const total=useTwoPass?2:1;
-        setAutoProgress({done:0,total});
-        const rewritten=await callClaudeAPI(apiKey,llmModel,raw,useTwoPass,
-          llmMode,styleSample,
-          p=>setAutoProgress({done:p.pass-1,total:p.total}));
-        /* In Humanize mode we polish (contractions, em-dash kill, opener
-           strip). In Paraphrase mode we leave Claude's output untouched —
-           the whole point is lexical divergence, not human-style polish. */
-        const finalText=llmMode==="paraphrase"
-          ?rewritten:polishLLMOutput(rewritten);
-        setRawBackup(raw);
-        setRaw(finalText);
-        setSwaps({});setPhraseSwaps({});
-        setActive(null);setActivePhrase(null);setOpenSentence(null);
-        setAutoProgress({done:total,total});
+        /* If a .docx was uploaded, paraphrase per-paragraph so the
+           structure (headings, lists, tables) can be rebuilt on
+           download. Otherwise paraphrase the whole text in one shot. */
+        const struct=docxStructureRef.current;
+        if(struct){
+          /* Only paraphrase paragraphs that have at least 5 words —
+             short ones (headings, list-item labels) are best left
+             untouched, both for accuracy and to save API calls. */
+          const tasks=struct.paragraphs.filter(p=>{
+            const wc=(p.originalText.match(/\b\w+\b/g)||[]).length;
+            return wc>=5;
+          });
+          const total=tasks.length*(useTwoPass?2:1);
+          setAutoProgress({done:0,total});
+          let done=0;
+          /* Three workers in parallel — fast enough that a 50-paragraph
+             doc finishes in ~1 minute, safe under Claude's rate limits. */
+          const CONCURRENCY=3;
+          const queue=tasks.slice();
+          async function worker(){
+            while(queue.length>0){
+              const task=queue.shift();
+              if(!task)return;
+              try{
+                const result=await callClaudeAPI(apiKey,llmModel,
+                  task.originalText,useTwoPass,llmMode,styleSample,null);
+                task.currentText=llmMode==="paraphrase"
+                  ?result:polishLLMOutput(result);
+              }catch(_){
+                task.currentText=task.originalText;
+              }
+              done+=(useTwoPass?2:1);
+              setAutoProgress({done,total});
+            }
+          }
+          await Promise.all(Array.from({length:CONCURRENCY},()=>worker()));
+          /* Rebuild the textarea preview from updated paragraphs. */
+          const rebuilt=struct.paragraphs
+            .map(p=>p.currentText)
+            .filter(t=>t.trim())
+            .join("\n\n");
+          setRawBackup(raw);
+          setRaw(rebuilt);
+          setSwaps({});setPhraseSwaps({});
+          setActive(null);setActivePhrase(null);setOpenSentence(null);
+        }else{
+          const total=useTwoPass?2:1;
+          setAutoProgress({done:0,total});
+          const rewritten=await callClaudeAPI(apiKey,llmModel,raw,useTwoPass,
+            llmMode,styleSample,
+            p=>setAutoProgress({done:p.pass-1,total:p.total}));
+          /* In Humanize mode we polish (contractions, em-dash kill, opener
+             strip). In Paraphrase mode we leave Claude's output untouched —
+             the whole point is lexical divergence, not human-style polish. */
+          const finalText=llmMode==="paraphrase"
+            ?rewritten:polishLLMOutput(rewritten);
+          setRawBackup(raw);
+          setRaw(finalText);
+          setSwaps({});setPhraseSwaps({});
+          setActive(null);setActivePhrase(null);setOpenSentence(null);
+          setAutoProgress({done:total,total});
+        }
       }catch(e){
         setAutoError("Claude API error: "+(e.message||String(e)));
       }finally{
@@ -1242,28 +1375,41 @@ function Humanizer(){
     setActive(null);setActivePhrase(null);setOpenSentence(null);
   },[rawBackup]);
 
-  /* Upload a .docx (parsed with mammoth.js) or a .txt file, drop the
-     text into the textarea, and clear any in-progress swaps. */
+  /* Upload a .docx (parsed structurally), .txt, or .md file. For .docx
+     we keep the full structure in docxStructureRef so downloads can
+     re-emit the file with original formatting preserved. */
   const handleFileUpload=useCallback(async(e)=>{
     const file=e.target.files&&e.target.files[0];
     if(!file)return;
     setAutoError("");
+    docxStructureRef.current=null;
+    setDocxFileName("");
     try{
       const name=file.name.toLowerCase();
       let text="";
       if(name.endsWith(".txt")||name.endsWith(".md")){
-        text=await file.text();
+        text=(await file.text()).trim();
       }else if(name.endsWith(".docx")){
-        if(typeof window.mammoth==="undefined"){
-          throw new Error("DOCX parser still loading — try again in a moment.");
-        }
         const buffer=await file.arrayBuffer();
-        const result=await window.mammoth.extractRawText({arrayBuffer:buffer});
-        text=(result&&result.value)||"";
+        /* Parse the structural representation (paragraphs + their
+           positions in the XML). This is what download uses to
+           rebuild a formatted .docx. */
+        const structure=await parseDocxStructure(buffer);
+        docxStructureRef.current={
+          fileName:file.name,
+          arrayBuffer:buffer,
+          paragraphs:structure.paragraphs,
+        };
+        setDocxFileName(file.name);
+        /* Build the plain-text view for the textarea by joining all
+           non-empty paragraphs with double newlines. */
+        text=structure.paragraphs
+          .map(p=>p.originalText)
+          .filter(t=>t.trim())
+          .join("\n\n");
       }else{
         throw new Error("Unsupported file type. Upload .docx, .txt, or .md.");
       }
-      text=text.trim();
       if(!text){
         throw new Error("No readable text found in that file.");
       }
@@ -1272,9 +1418,20 @@ function Humanizer(){
       setActive(null);setActivePhrase(null);setOpenSentence(null);
       setRawBackup(null);
     }catch(err){
+      docxStructureRef.current=null;
+      setDocxFileName("");
       setAutoError("Upload error: "+(err.message||String(err)));
     }finally{
       if(fileInputRef.current)fileInputRef.current.value="";
+    }
+  },[]);
+
+  /* Manual textarea edits invalidate the cached .docx structure
+     (the user can no longer expect a structure-preserving download). */
+  const clearDocxStructure=useCallback(()=>{
+    if(docxStructureRef.current){
+      docxStructureRef.current=null;
+      setDocxFileName("");
     }
   },[]);
 
@@ -1298,12 +1455,24 @@ function Humanizer(){
   const downloadOutput=useCallback(async()=>{
     if(!workingText.trim())return;
     try{
-      const blob=await buildDocxBlob(workingText);
+      const struct=docxStructureRef.current;
+      let blob,defaultName;
+      if(struct){
+        /* Rebuild the original .docx with paraphrased text per
+           paragraph. Preserves headings, lists, tables, fonts. */
+        blob=await rebuildDocxFromStructure(struct.arrayBuffer,
+          struct.paragraphs);
+        const base=struct.fileName.replace(/\.docx$/i,"");
+        defaultName=base+"-paraphrased.docx";
+      }else{
+        blob=await buildDocxBlob(workingText);
+        const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+        defaultName="humanizer-"+stamp+".docx";
+      }
       const url=URL.createObjectURL(blob);
-      const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
       const a=document.createElement("a");
       a.href=url;
-      a.download="humanizer-"+stamp+".docx";
+      a.download=defaultName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1460,6 +1629,13 @@ function Humanizer(){
               style={{display:"none"}}/>
           </div>
         </div>
+        {docxFileName&&(
+          <div style={S.docxBadge}>
+            📎 <strong>{docxFileName}</strong> loaded with formatting.
+            Paraphrase will run per-paragraph; download will preserve
+            headings, lists, tables, and fonts.
+          </div>
+        )}
         <textarea style={S.textarea} rows={6} value={raw}
           placeholder="Paste a paragraph or essay here, or upload a .docx file…"
           onChange={e=>{
@@ -1467,6 +1643,7 @@ function Humanizer(){
             setSwaps({});setPhraseSwaps({});
             setActive(null);setActivePhrase(null);setOpenSentence(null);
             setRawBackup(null);
+            clearDocxStructure();
           }}/>
       </section>
 
@@ -2366,6 +2543,10 @@ const S={
     border:"1px solid #cbd5e1",borderRadius:7,
     padding:"6px 12px",fontSize:12.5,fontWeight:600,cursor:"pointer",
     fontFamily:"inherit"},
+  docxBadge:{margin:"0 0 10px",padding:"8px 12px",borderRadius:7,
+    background:"#eef2ff",border:"1px solid #c7d2fe",
+    fontSize:12.5,color:"#3730a3",lineHeight:1.5,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
   modeRow:{display:"flex",gap:6,marginTop:14,alignItems:"center",
     fontFamily:"ui-sans-serif, system-ui, sans-serif"},
   modeLabel:{fontSize:11,fontWeight:700,letterSpacing:"0.06em",

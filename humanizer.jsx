@@ -930,6 +930,7 @@ export default function Humanizer(){
   const [styleSample,setStyleSample]=useState("");
   const [showStyleBox,setShowStyleBox]=useState(false);
   const [autoError,setAutoError]=useState("");
+  const fileInputRef=useRef(null);
 
   /* Load saved key/model/two-pass/style from localStorage on mount;
      persist on every change. */
@@ -1185,6 +1186,42 @@ export default function Humanizer(){
     setActive(null);setActivePhrase(null);setOpenSentence(null);
   },[rawBackup]);
 
+  /* Upload a .docx (parsed with mammoth.js) or a .txt file, drop the
+     text into the textarea, and clear any in-progress swaps. */
+  const handleFileUpload=useCallback(async(e)=>{
+    const file=e.target.files&&e.target.files[0];
+    if(!file)return;
+    setAutoError("");
+    try{
+      const name=file.name.toLowerCase();
+      let text="";
+      if(name.endsWith(".txt")||name.endsWith(".md")){
+        text=await file.text();
+      }else if(name.endsWith(".docx")){
+        if(typeof window.mammoth==="undefined"){
+          throw new Error("DOCX parser still loading — try again in a moment.");
+        }
+        const buffer=await file.arrayBuffer();
+        const result=await window.mammoth.extractRawText({arrayBuffer:buffer});
+        text=(result&&result.value)||"";
+      }else{
+        throw new Error("Unsupported file type. Upload .docx, .txt, or .md.");
+      }
+      text=text.trim();
+      if(!text){
+        throw new Error("No readable text found in that file.");
+      }
+      setRaw(text);
+      setSwaps({});setPhraseSwaps({});
+      setActive(null);setActivePhrase(null);setOpenSentence(null);
+      setRawBackup(null);
+    }catch(err){
+      setAutoError("Upload error: "+(err.message||String(err)));
+    }finally{
+      if(fileInputRef.current)fileInputRef.current.value="";
+    }
+  },[]);
+
   const stats=useMemo(()=>{
     let w3=0,w2=0,w1=0,words=0;
     tokens.forEach(t=>{
@@ -1336,9 +1373,21 @@ export default function Humanizer(){
 
       {/* INPUT */}
       <section style={S.card}>
-        <label style={S.label}>Your text</label>
+        <div style={S.inputHead}>
+          <label style={S.label}>Your text</label>
+          <div style={S.inputActions}>
+            <button type="button" style={S.btnUpload}
+              onClick={()=>fileInputRef.current&&fileInputRef.current.click()}>
+              📄 Upload .docx
+            </button>
+            <input ref={fileInputRef} type="file"
+              accept=".docx,.txt,.md"
+              onChange={handleFileUpload}
+              style={{display:"none"}}/>
+          </div>
+        </div>
         <textarea style={S.textarea} rows={6} value={raw}
-          placeholder="Paste a paragraph or essay here..."
+          placeholder="Paste a paragraph or essay here, or upload a .docx file…"
           onChange={e=>{
             setRaw(e.target.value);
             setSwaps({});setPhraseSwaps({});
@@ -2229,6 +2278,14 @@ const S={
     padding:"10px 18px",fontSize:14,fontWeight:700,cursor:"pointer",
     minWidth:170},
   btnAutoBusy:{background:"#64748b",cursor:"wait"},
+  inputHead:{display:"flex",justifyContent:"space-between",alignItems:"center",
+    marginBottom:8,gap:8,flexWrap:"wrap"},
+  inputActions:{display:"flex",gap:6,
+    fontFamily:"ui-sans-serif, system-ui, sans-serif"},
+  btnUpload:{background:"#fff",color:"#0f172a",
+    border:"1px solid #cbd5e1",borderRadius:7,
+    padding:"6px 12px",fontSize:12.5,fontWeight:600,cursor:"pointer",
+    fontFamily:"inherit"},
   modeRow:{display:"flex",gap:6,marginTop:14,alignItems:"center",
     fontFamily:"ui-sans-serif, system-ui, sans-serif"},
   modeLabel:{fontSize:11,fontWeight:700,letterSpacing:"0.06em",
